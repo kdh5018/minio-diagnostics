@@ -1,0 +1,8 @@
+# Public source allowlist. Operational data stays local, even when using git add .
+/*
+!/.gitignore
+!/.gitattributes
+!/README.md
+!/aistordoctor.py
+!/analyze.py
+!/run_tests.py
