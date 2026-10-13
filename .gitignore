@@ -6,3 +6,5 @@
 !/aistordoctor.py
 !/analyze.py
 !/run_tests.py
+!/verify_browser.cjs
+!/R1_ACCEPTANCE.md

@@ -2,6 +2,7 @@
 R2 health and R3/R4 analysis are deliberately not implemented in R1.
 """
 import argparse
+from collections import Counter
 import datetime as dt
 import hashlib
 import html
@@ -12,13 +13,20 @@ from pathlib import Path
 import re
 import stat
 import sys
+import time
 import uuid
 
-VERSION = '0.1.0-r1'
+VERSION = '0.1.1-r1'
+SCHEMA_VERSION = '1.1-r1'
+PARSER_VERSION = 'official-markdown-r1-2'
+POLICY_VERSION = 'r1-1'
 DEFAULT_OUTPUT_DIR = Path(os.environ.get('AISTOR_DIAG_OUTPUT_DIR', str(Path.home() / 'minio-airgap-diag-output')))
 MAX_BYTES = 2 * 1024 * 1024
 MAX_LINES = 20000
 MAX_CHECKS = 1000
+MAX_BLOCKS = 2000
+MAX_OUTPUT_BYTES = 16 * 1024 * 1024
+MAX_PROCESS_SECONDS = 10
 KST = dt.timezone(dt.timedelta(hours=9))
 
 
@@ -34,17 +42,74 @@ def cells(line):
     return [x.strip().replace('\\|', '|') for x in re.split(r'(?<!\\)\|', line.strip().strip('|'))]
 
 
+def evidence_blocks(lines, start_line):
+    """Normalize the supported Markdown blocks without interpreting their content."""
+    blocks, section, position = [], 'unlabelled', 0
+    while position < len(lines):
+        line = lines[position]
+        marker = re.fullmatch(r'\s*(?:\*\*)?(Info|Resolution):?(?:\*\*)?:?\s*', line, re.I)
+        if marker:
+            section = marker[1].lower()
+            position += 1
+            continue
+        if not line.strip():
+            position += 1
+            continue
+        begin = position
+        fence = re.match(r'^\s*(`{3,}|~{3,})(.*)$', line)
+        if fence:
+            position += 1
+            content = []
+            close = r'\s*' + re.escape(fence[1][0]) + '{' + str(len(fence[1])) + r',}\s*'
+            while position < len(lines) and not re.fullmatch(close, lines[position]):
+                content.append(lines[position])
+                position += 1
+            closed = position < len(lines)
+            position += int(closed)
+            block = {'type': 'code', 'language': fence[2].strip(), 'text': '\n'.join(content), 'closed': closed}
+        elif line.strip().startswith('|'):
+            table = []
+            while position < len(lines) and lines[position].strip().startswith('|'):
+                table.append(cells(lines[position]))
+                position += 1
+            has_header = len(table) > 1 and all(re.fullmatch(r':?-+:?', cell) for cell in table[1])
+            block = {'type': 'table', 'headers': table[0] if has_header else [],
+                     'rows': table[2:] if has_header else table}
+        else:
+            kind = 'list' if re.match(r'^\s*(?:[-*+] |\d+[.)] )', line) else 'text'
+            content = [line]
+            position += 1
+            while position < len(lines) and lines[position].strip():
+                next_line = lines[position]
+                if re.match(r'^\s*(?:`{3,}|~{3,}|\||(?:\*\*)?(?:Info|Resolution):)', next_line, re.I):
+                    break
+                next_kind = 'list' if re.match(r'^\s*(?:[-*+] |\d+[.)] )', next_line) else 'text'
+                if next_kind != kind:
+                    break
+                content.append(next_line)
+                position += 1
+            block = {'type': kind, 'text': '\n'.join(content)}
+        blocks.append(dict(block, section=section, source_locator={
+            'input': 'input-001', 'line': start_line + begin, 'end_line': start_line + position - 1}))
+        if len(blocks) > MAX_BLOCKS:
+            raise InputError('block limit exceeded')
+    return blocks
+
+
 def parse_report(text):
+    deadline = time.monotonic() + MAX_PROCESS_SECONDS
     text = text.lstrip('\ufeff').replace('\r\n', '\n').replace('\r', '\n')
     if len(text.encode('utf-8')) > MAX_BYTES or len(text.splitlines()) > MAX_LINES:
         raise InputError('input limit exceeded')
     visible, fenced = [], False
     for n, line in enumerate(text.splitlines(), 1):
+        if time.monotonic() > deadline:
+            raise InputError('processing time limit exceeded')
         if re.match(r'^\s*(`{3,}|~{3,})', line):
             if not fenced:
                 fence = re.match(r'^\s*(`{3,}|~{3,})', line).group(1)
                 fenced = True
-            elif line.strip().startswith(fence) and len(line.strip()) >= len(fence):
+            elif re.fullmatch(r'\s*' + re.escape(fence[0]) + '{' + str(len(fence)) + r',}\s*', line):
                 fenced = False
             continue
         if not fenced:
@@ -119,12 +184,14 @@ def parse_report(text):
             notes.append('check detail not uniquely linked')
         checks.append({'source_check_id': row['Check'], 'official_status': row['Status'], 'title': row.get('Name', row['Check']),
                        'observed': row.get('Description', ''), 'detail': '\n'.join(detail['lines']) if detail else '',
+                       'evidence_blocks': evidence_blocks(detail['lines'], detail['line'] + 1) if detail else [],
                        'source_locator': {'input': 'input-001', 'line': n}})
     for i, detail in enumerate(details):
         if i not in used:
             notes.append('unmatched detail preserved')
             checks.append({'source_check_id': None, 'official_status': detail['status'], 'title': detail['name'],
                            'observed': '', 'detail': '\n'.join(detail['lines']),
+                           'evidence_blocks': evidence_blocks(detail['lines'], detail['line'] + 1),
                            'source_locator': {'input': 'input-001', 'line': detail['line']}})
     ids = [c['source_check_id'] for c in checks if c['source_check_id']]
     if len(ids) != len(set(ids)):
@@ -133,6 +200,12 @@ def parse_report(text):
         notes.append('summary/detail mismatch')
     if fenced:
         notes.append('unclosed fence')
+    if any(c['official_status'] not in ('passed', 'error', 'warning') for c in checks):
+        notes.append('unrecognized official status')
+    if sum(len(c['evidence_blocks']) for c in checks) > MAX_BLOCKS:
+        raise InputError('block limit exceeded')
+    if time.monotonic() > deadline:
+        raise InputError('processing time limit exceeded')
     return summary, collected, checks, sorted(set(notes))
 
 
@@ -193,6 +266,7 @@ class Masker:
 
 
 def model(text, mask='strict', as_of=None):
+    started = time.monotonic()
     summary, collected, checks, notes = parse_report(text)
     if as_of:
         try:
@@ -208,16 +282,37 @@ def model(text, mask='strict', as_of=None):
         'sys.mem.iommu': ('설정', 'unclassified', '부팅 옵션의 검사 불일치이며 실제 I/O 장애를 확정하지 않습니다. 호스트·배포 방식과 영향을 확인하고 변경은 별도 승인하십시오.'),
         'sys.mem.thp': ('설정', 'P2', '보고서에 관측된 설정만 사용합니다. defrag와 max_ptes_none의 실제 값은 미확인입니다. 변경 영향과 호스트 적용 상태를 확인하십시오.'),
         'minio.net.tls.valid': ('보안', 'P2', '상세 만료 원인을 확인하십시오. Secret 이름·TLS 종료 위치는 미확인입니다. 교체 후 실제 제공 인증서를 재검증하십시오.')}
-    findings = []
+    findings, identifiers = [], Counter()
     expiry = None
-    for i, check in enumerate(checks, 1):
+    certificate_locator = None
+    for check in checks:
         category, priority, recommendation = explain.get(check['source_check_id'], ('미분류', 'unclassified', '등록되지 않은 검사는 원본을 보존하며 영향과 우선순위를 추정하지 않습니다.'))
-        if check['official_status'] == 'passed':
+        passed = check['official_status'] == 'passed'
+        if passed:
             priority = 'unclassified'
-        entry = dict(check, id='official-%03d' % i, origin='official_import', rule_result=None,
-                     assessment='assessable', priority=priority, category=category, recommendation=recommendation,
+            recommendation = '원본의 개별 검사 통과를 보존합니다. 이를 현재 서비스 정상 또는 변경 필요 판정으로 확대하지 않습니다.'
+        key = check['source_check_id'] or 'unlinked:' + check['title']
+        identifier = 'official-' + hashlib.sha256(key.encode('utf-8')).hexdigest()[:16]
+        identifiers[identifier] += 1
+        if identifiers[identifier] > 1:
+            identifier += '-' + str(identifiers[identifier])
+        known = check['source_check_id'] in explain
+        entry = dict(check, id=identifier, origin='official_import', rule_result=None,
+                     assessment='assessable' if known else 'unsupported',
+                     assessment_reason='official_import_only' if known else 'no_registered_explanation',
+                     priority=priority, category=category, recommendation=recommendation,
+                     affected=[], affected_reason='targets_not_normalized_in_r1',
+                     impact='실제 서비스 영향은 이 보고서만으로 확정하지 않습니다.',
+                     approval_required=False if passed else True if known else None,
+                     approval_reason='no_change_recommended_for_passed_import' if passed else
+                         'changes_require_separate_approval' if known else 'no_action_plan_for_unknown_check',
+                     verification_steps=['원본 관측과 실제 대상·설정을 읽기 전용으로 대조합니다.',
+                                         '변경이 별도로 승인·수행된 경우 동일 검사와 실제 적용 상태를 재확인합니다.'] if known and not passed else [],
+                     refs=[{'type': 'official_report', 'source_locator': check['source_locator'],
+                            'check_version': None, 'reason': 'source_check_version_unknown'}],
                      basis='official_report', limitations=['통과 상세가 제공되지 않은 검사는 복원하지 않습니다.', '현재 서비스 상태를 실시간 확인한 결과가 아닙니다.'])
         if check['source_check_id'] == 'minio.net.tls.valid':
+            certificate_locator = check['source_locator']
             times = re.findall(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ', check['detail'])
             if len(times) == 2:
                 try:
@@ -225,14 +320,25 @@ def model(text, mask='strict', as_of=None):
                 except ValueError:
                     notes.append('invalid certificate timestamp')
         findings.append(entry)
-    report = {'schema_version': '1.0-r1', 'tool_version': VERSION,
+    report = {'schema_version': SCHEMA_VERSION, 'tool_version': VERSION,
               'input_metadata': {'id': 'input-001', 'format': 'official_markdown', 'collected_at': collected.isoformat() if collected else None,
-                                 'as_of': basis.isoformat() if basis else None, 'as_of_origin': 'explicit' if as_of else 'collection', 'timezone': 'Asia/Seoul'},
+                                 'as_of': basis.isoformat() if basis else None, 'as_of_origin': 'explicit' if as_of else 'collection',
+                                 'as_of_reason': None if basis else 'collection_time_missing_or_invalid',
+                                 'parser_version': PARSER_VERSION, 'timezone': 'Asia/Seoul'},
+              'source_versions': {name: {'value': None, 'reason': 'not_available_in_supported_markdown_contract'} for name in ('aistor', 'mc')},
+              'analysis_summary': {name + '_counts': dict(sorted(Counter(f[name] for f in findings).items()))
+                                   for name in ('priority', 'category', 'assessment')},
+              'policy': {'version': POLICY_VERSION, 'profile': 'unspecified',
+                         'scope': 'local_explanations_not_vendor_severity_or_custom_health_rules'},
               'official_summary': summary, 'findings': findings,
-              'check_results': [{'source_check_id': c['source_check_id'], 'origin': 'official_import', 'official_status': c['official_status'], 'rule_result': None, 'source_locator': c['source_locator']} for c in checks],
+              'check_results': [{'finding_id': f['id'], 'source_check_id': f['source_check_id'], 'origin': 'official_import',
+                                 'official_status': f['official_status'], 'rule_result': None, 'source_locator': f['source_locator']} for f in findings],
               'facts': {'certificate_expires_at': expiry.isoformat() if expiry else None,
                         'certificate_expires_kst': expiry.astimezone(KST).isoformat() if expiry else None,
-                        'certificate_remaining_seconds': int((expiry - basis).total_seconds()) if expiry and basis else None},
+                        'certificate_remaining_seconds': int((expiry - basis).total_seconds()) if expiry and basis else None,
+                        'certificate_source_locator': certificate_locator,
+                        'certificate_time_reason': None if expiry and basis else
+                            'analysis_time_unavailable' if expiry else 'certificate_expiry_not_available'},
               'coverage': {'passed_details': 'not_available_from_aggregate', 'health': 'not_supported_in_r1', 'comparison': 'not_supported_in_r1', 'operational_analysis': 'not_supported_in_r1'},
               'parser_errors': notes, 'run_status': 'partial' if notes else 'success',
               'completeness': {'source_coverage': 'official_summary_and_provided_details', 'requested_scope_satisfied': not notes},
@@ -240,6 +346,8 @@ def model(text, mask='strict', as_of=None):
     masker = Masker(mask, public_check_ids=explain)
     report = masker.apply(report)
     masker.verify(report)
+    if time.monotonic() - started > MAX_PROCESS_SECONDS:
+        raise InputError('processing time limit exceeded')
     return report
 
 
@@ -247,11 +355,33 @@ def markdown(report):
     def literal(value):
         # All user-origin text remains inert even in HTML-capable Markdown viewers.
         return html.escape(str(value)).replace('`', '&#96;').replace('[', '&#91;').replace(']', '&#93;').replace('*', '&#42;').replace('_', '&#95;').replace('|', '&#124;').replace('!', '&#33;')
-    out = ['# MinIO AIStor 폐쇄망 진단 보고서', '', '## 공식 요약', '', json.dumps(report['official_summary'], ensure_ascii=False), '',
+    out = ['# MinIO AIStor 폐쇄망 진단 보고서', '',
+           '도구 버전: ' + report['tool_version'] + ' / 스키마: ' + report['schema_version'],
+           '해설 정책: ' + report['policy']['version'] + ' / 환경: ' + report['policy']['profile'], '',
+           '## 공식 요약', '', json.dumps(report['official_summary'], ensure_ascii=False), '',
            '분석 상태: ' + report['run_status'], '', '통과 상세 부재는 정상 검사 복원을 허용하지 않습니다.', '']
     for f in report['findings']:
-        out.extend(['## ' + literal(f['title']), '', '공식 상태: ' + literal(f['official_status']), '우선순위: ' + f['priority'], '', literal(f['observed']), '', literal(f['recommendation']), '', '### 원본 근거(마스킹)', '', literal(f['detail']).replace('\n', '\n\n'), ''])
-    out.extend(['## 확인된 정보', '', literal(report['input_metadata']), literal(report['facts']), '', '## 한계', '', literal(report['coverage']), literal(report['parser_errors']), literal(report['masking']['limitations']), ''])
+        out.extend(['## ' + literal(f['title']), '', '공식 상태: ' + literal(f['official_status']), '우선순위: ' + f['priority'],
+                    '평가 범위: ' + f['assessment'] + ' / ' + f['assessment_reason'], '',
+                    literal(f['observed']), '', literal(f['recommendation']), '', literal(f['impact']),
+                    '변경 승인: ' + {True: '필요', False: '불필요', None: '미정'}[f['approval_required']], '',
+                    '### 재확인 절차', '', *['- ' + literal(step) for step in f['verification_steps']], '',
+                    '### 원본 근거(마스킹)', ''])
+        for block in f['evidence_blocks']:
+            out.append('근거 구간: ' + block['section'] + ' / 줄 ' + str(block['source_locator']['line']))
+            if block['type'] == 'table' and block['headers'] and all(len(row) == len(block['headers']) for row in block['rows']):
+                out.extend(['', '| ' + ' | '.join(literal(cell) for cell in block['headers']) + ' |',
+                            '| ' + ' | '.join('---' for _ in block['headers']) + ' |'])
+                out.extend('| ' + ' | '.join(literal(cell) for cell in row) + ' |' for row in block['rows'])
+            else:
+                out.extend(['', literal(block.get('text', block.get('rows', []))).replace('\n', '\n\n')])
+            out.append('')
+        if not f['evidence_blocks']:
+            out.extend([literal(f['detail']).replace('\n', '\n\n'), ''])
+    out.extend(['## 확인된 정보', '', literal(report['input_metadata']), literal(report['facts']),
+                '', '## 자체 해설 요약', '', literal(report['analysis_summary']),
+                '', '## 입력 버전', '', literal(report['source_versions']),
+                '', '## 한계', '', literal(report['coverage']), literal(report['parser_errors']), literal(report['masking']['limitations']), ''])
     return '\n'.join(out)
 
 
@@ -259,9 +389,44 @@ def html_report(report):
     esc = lambda x: html.escape(str(x), quote=True)
     articles = []
     for f in report['findings']:
-        articles.append('<article data-status="%s" data-priority="%s" data-category="%s"><h2>%s</h2><p>공식: %s / 우선순위: %s / %s</p><p>%s</p><p>%s</p><details><summary>마스킹된 근거</summary><pre>%s</pre></details></article>' %
-                        tuple(esc(x) for x in (f['official_status'], f['priority'], f['category'], f['title'], f['official_status'], f['priority'], f['category'], f['observed'], f['recommendation'], f['detail'])))
-    return '''<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"><title>MinIO AIStor 진단 보고서</title><style>body{font-family:system-ui,sans-serif;max-width:1100px;margin:auto;padding:24px}article{border:1px solid #bbb;border-radius:8px;padding:16px;margin:16px 0}pre{white-space:pre-wrap;overflow-wrap:anywhere}input,select{padding:8px} @media print{.filters{display:none}article{break-inside:avoid}}</style><h1>MinIO AIStor 폐쇄망 진단 보고서</h1><p>상태: %s</p><p>공식 요약: %s</p><p>통과 상세는 복원하지 않습니다. 현재 서비스 상태의 실시간 검증이 아닙니다.</p><div class="filters"><label>검색 <input id="q" type="search"></label><label>공식 상태 <select id="s"><option value="">전체</option><option>error</option><option>warning</option><option>passed</option></select></label><label>우선순위 <select id="p"><option value="">전체</option><option>P1</option><option>P2</option><option>P3</option><option>P4</option><option>unclassified</option></select></label><label>영역 <select id="c"><option value="">전체</option><option>가용성</option><option>설정</option><option>보안</option><option>미분류</option></select></label></div>%s<h2>분석 한계</h2><pre>%s</pre><p>%s</p><script>'use strict';function filter(){const q=document.getElementById('q').value.toLowerCase(),s=document.getElementById('s').value,p=document.getElementById('p').value,c=document.getElementById('c').value;document.querySelectorAll('article').forEach(a=>{a.hidden=!(a.textContent.toLowerCase().includes(q)&&(!s||a.dataset.status===s)&&(!p||a.dataset.priority===p)&&(!c||a.dataset.category===c));});}document.getElementById('q').addEventListener('input',filter);document.getElementById('s').addEventListener('change',filter);document.getElementById('p').addEventListener('change',filter);document.getElementById('c').addEventListener('change',filter);</script></html>''' % (esc(report['run_status']), esc(json.dumps(report['official_summary'], ensure_ascii=False)), ''.join(articles), esc(json.dumps({'input_metadata': report['input_metadata'], 'coverage': report['coverage'], 'notes': report['parser_errors'], 'facts': report['facts']}, ensure_ascii=False, indent=2)), esc(report['masking']['limitations']))
+        evidence = []
+        for block in f['evidence_blocks']:
+            evidence.append('<p>근거 구간: %s / 줄 %s</p>' % (esc(block['section']), block['source_locator']['line']))
+            if block['type'] == 'table':
+                header = '<tr>' + ''.join('<th>%s</th>' % esc(cell) for cell in block['headers']) + '</tr>'
+                rows = ''.join('<tr>' + ''.join('<td>%s</td>' % esc(cell) for cell in row) + '</tr>' for row in block['rows'])
+                evidence.append('<div class="table-scroll"><table>%s%s</table></div>' % (header, rows))
+            else:
+                evidence.append('<pre>%s</pre>' % esc(block['text']))
+        steps = ''.join('<li>%s</li>' % esc(step) for step in f['verification_steps'])
+        articles.append('<article data-status="%s" data-priority="%s" data-category="%s"><h2>%s</h2><p>공식: %s / 우선순위: %s / %s</p><p>%s</p><p>%s</p><p>%s</p><p>평가 범위: %s / 변경 승인: %s</p><ul>%s</ul><details><summary>마스킹된 근거</summary>%s</details></article>' %
+                        (*tuple(esc(x) for x in (f['official_status'], f['priority'], f['category'], f['title'], f['official_status'],
+                                               f['priority'], f['category'], f['observed'], f['recommendation'], f['impact'],
+                                               f['assessment'], {True: '필요', False: '불필요', None: '미정'}[f['approval_required']])),
+                         steps, ''.join(evidence) or '<pre>%s</pre>' % esc(f['detail'])))
+    return '''<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+<title>MinIO AIStor 진단 보고서</title><style>
+body{font-family:system-ui,sans-serif;max-width:1100px;margin:auto;padding:24px;overflow-wrap:anywhere}
+h1{font-size:28px}h2{font-size:20px}article{border:1px solid #bbb;border-radius:8px;padding:16px;margin:16px 0}
+pre{white-space:pre-wrap;overflow-wrap:anywhere}.filters{display:flex;flex-wrap:wrap;gap:12px}
+label{display:flex;align-items:center;gap:6px}input,select{padding:8px;min-width:0;max-width:100%%}
+summary{cursor:pointer}summary:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid #167d60}
+.table-scroll{overflow-x:auto}table{border-collapse:collapse}th,td{border:1px solid #bbb;padding:8px;text-align:left}
+@media(max-width:480px){body{padding:16px}h1{font-size:24px}}
+@media print{.filters{display:none}article{break-inside:avoid}}
+</style><h1>MinIO AIStor 폐쇄망 진단 보고서</h1><p>도구·스키마·정책: %s</p><p>상태: %s</p><p>공식 요약: %s</p>
+<p>통과 상세는 복원하지 않습니다. 현재 서비스 상태의 실시간 검증이 아닙니다.</p>
+<div class="filters"><label>검색 <input id="q" type="search"></label>
+<label>공식 상태 <select id="s"><option value="">전체</option><option>error</option><option>warning</option><option>passed</option></select></label>
+<label>우선순위 <select id="p"><option value="">전체</option><option>P1</option><option>P2</option><option>P3</option><option>P4</option><option>unclassified</option></select></label>
+<label>영역 <select id="c"><option value="">전체</option><option>가용성</option><option>설정</option><option>보안</option><option>미분류</option></select></label></div>
+%s<h2>분석 한계·입력 버전·자체 해설 요약</h2><pre>%s</pre><p>%s</p>
+<script>'use strict';function filter(){const q=document.getElementById('q').value.toLowerCase(),s=document.getElementById('s').value,p=document.getElementById('p').value,c=document.getElementById('c').value;document.querySelectorAll('article').forEach(a=>{a.hidden=!(a.textContent.toLowerCase().includes(q)&&(!s||a.dataset.status===s)&&(!p||a.dataset.priority===p)&&(!c||a.dataset.category===c));});}document.getElementById('q').addEventListener('input',filter);document.getElementById('s').addEventListener('change',filter);document.getElementById('p').addEventListener('change',filter);document.getElementById('c').addEventListener('change',filter);</script></html>''' % (
+        esc(report['tool_version'] + ' / ' + report['schema_version'] + ' / ' + report['policy']['version']),
+        esc(report['run_status']), esc(json.dumps(report['official_summary'], ensure_ascii=False)), ''.join(articles),
+        esc(json.dumps({key: report[key] for key in ('input_metadata', 'source_versions', 'analysis_summary', 'coverage', 'parser_errors', 'facts')}, ensure_ascii=False, indent=2)),
+        esc(report['masking']['limitations']))
 
 
 def require_private(path, directory=False):
@@ -297,10 +462,13 @@ def write_exclusive(path, data):
 
 
 def save(report, out_dir, force=False):
+    started = time.monotonic()
     root = secure_dir(out_dir)
     pointer = root / 'CURRENT.json'
     if pointer.is_symlink():
         raise OutputError('symlink pointer refused')
+    if pointer.exists():
+        require_private(pointer)
     if pointer.exists() and not force:
         raise OutputError('existing result refused; --force required')
     # fcntl is stdlib on the current Linux environment; the persistent lock file
@@ -309,23 +477,43 @@ def save(report, out_dir, force=False):
     fd = os.open(root / '.output.lock', os.O_RDWR | os.O_CREAT | getattr(os, 'O_NOFOLLOW', 0), 0o600)
     generation = root / ('run-' + uuid.uuid4().hex)
     try:
+        require_private(root / '.output.lock')
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         if pointer.exists() and not force:
             raise OutputError('concurrent result collision')
         generation.mkdir(mode=0o700)
         require_private(generation, directory=True)
-        outputs = {'aistor-diag-report.json': json.dumps(report, ensure_ascii=False, indent=2) + '\n',
+        outputs = {'aistor-diag-report.json': json.dumps(report, ensure_ascii=False, separators=(',', ':')) + '\n',
                    'aistor-diag-report.md': markdown(report), 'aistor-diag-report.html': html_report(report)}
+        if sum(len(body.encode('utf-8')) for body in outputs.values()) > MAX_OUTPUT_BYTES:
+            raise OutputError('output size limit exceeded')
+        if time.monotonic() - started > MAX_PROCESS_SECONDS:
+            raise OutputError('rendering time limit exceeded')
         hashes = {}
         for name, body in outputs.items():
             write_exclusive(generation / name, body)
             hashes[name] = hashlib.sha256(body.encode('utf-8')).hexdigest()
         json.loads((generation / 'aistor-diag-report.json').read_text(encoding='utf-8'))
-        manifest = {'tool_version': VERSION, 'schema_version': report['schema_version'], 'run_status': report['run_status'],
+        manifest = {'run_id': generation.name, 'requested_formats': ['html', 'markdown', 'json'],
+                    'tool_version': report['tool_version'], 'schema_version': report['schema_version'],
+                    'parser_version': report['input_metadata']['parser_version'],
+                    'policy_version': report['policy']['version'], 'masking_policy_version': report['masking']['policy_version'],
+                    'run_status': report['run_status'],
                     'completeness': report['completeness'], 'files': hashes, 'commit': 'validated'}
         write_exclusive(generation / 'manifest.json', json.dumps(manifest, ensure_ascii=False, indent=2) + '\n')
+        if json.loads((generation / 'manifest.json').read_text(encoding='utf-8')) != manifest:
+            raise OutputError('manifest verification failed')
+        for name, expected in hashes.items():
+            require_private(generation / name)
+            if hashlib.sha256((generation / name).read_bytes()).hexdigest() != expected:
+                raise OutputError('checksum verification failed')
         marker = root / ('CURRENT-' + uuid.uuid4().hex + '.tmp')
         write_exclusive(marker, json.dumps({'generation': generation.name, 'manifest': 'manifest.json'}) + '\n')
+        require_private(marker)
+        if pointer.exists():
+            require_private(pointer)
+        require_private(generation / 'manifest.json')
+        require_private(root, directory=True)
         os.replace(marker, pointer)
         return generation
     except (OSError, ValueError) as exc:
@@ -355,7 +543,11 @@ def main(argv=None, *, default_out_dir=None):
     try:
         if args.official_report.stat().st_size > MAX_BYTES:
             raise InputError('input limit exceeded')
-        text = args.official_report.read_text(encoding='utf-8-sig')
+        with args.official_report.open('rb') as stream:
+            data = stream.read(MAX_BYTES + 1)
+        if len(data) > MAX_BYTES:
+            raise InputError('input limit exceeded')
+        text = data.decode('utf-8-sig')
         report = model(text, args.mask, args.as_of)
     except (InputError, OSError, UnicodeError):
         print('입력 오류: 필수 형식·인코딩·경로·제한을 확인하십시오.', file=sys.stderr)

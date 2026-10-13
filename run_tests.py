@@ -9,6 +9,7 @@ import contextlib
 import hashlib
 from io import StringIO
 import json
+import multiprocessing
 import os
 from pathlib import Path
 import tempfile
@@ -37,6 +38,21 @@ host=test.svc.cluster.local:9000 password=canary-secret
 | 999 | error | fake.check | Fake | fake |
 ```
 '''
+
+
+def concurrent_writer(root, ready, release):
+    original = a.write_exclusive
+    waiting = False
+    def paused_write(path, data):
+        nonlocal waiting
+        original(path, data)
+        if not waiting:
+            waiting = True
+            ready.set()
+            if not release.wait(10):
+                raise RuntimeError('synthetic synchronization timeout')
+    with patch.object(a, 'write_exclusive', side_effect=paused_write):
+        a.save(a.model(SYNTHETIC), root, force=True)
 
 
 class R1Tests(unittest.TestCase):
@@ -233,6 +249,189 @@ class R1Tests(unittest.TestCase):
         for body in (a.markdown(r), a.html_report(r)):
             self.assertIn('2026-10-21T10:56:42+09:00', body)
             self.assertIn('752393', body)
+
+    def test_structured_evidence_and_source_lines(self):
+        text = SYNTHETIC.replace('host=test.svc.cluster.local:9000 password=canary-secret',
+                                '| Setting | Value |\n|---|---|\n| mode | always |\n\n- observed item')
+        blocks = a.model(text)['findings'][0]['evidence_blocks']
+        table = next(b for b in blocks if b['type'] == 'table')
+        code = next(b for b in blocks if b['type'] == 'code')
+        self.assertEqual(table['section'], 'info')
+        self.assertEqual(table['headers'], ['Setting', 'Value'])
+        self.assertEqual(table['rows'], [['mode', 'always']])
+        self.assertEqual(table['source_locator']['line'], text.splitlines().index('| Setting | Value |') + 1)
+        self.assertEqual(code['section'], 'resolution')
+        self.assertTrue(code['closed'])
+        self.assertIn('fake.check', code['text'])
+        self.assertTrue(any(b['type'] == 'list' for b in blocks))
+        self.assertIn('<table>', a.html_report(a.model(text)))
+        self.assertIn('| Setting | Value |', a.markdown(a.model(text)))
+
+    def test_fenced_info_marker_is_inert(self):
+        report = a.model(SYNTHETIC.replace('# this is text, never executed', '**Info:**\n```python\n## Summary'))
+        blocks = report['findings'][0]['evidence_blocks']
+        self.assertEqual(len(report['findings']), 1)
+        self.assertTrue(all(b['section'] == 'resolution' for b in blocks if b['type'] == 'code'))
+        self.assertEqual(report['run_status'], 'success')
+
+    def test_stable_ids_do_not_depend_on_row_order(self):
+        row = '| 2 | error | other.check | Second check | Second observation |'
+        text = SYNTHETIC.replace('1 errors', '2 errors').replace('## Failed checks', row + '\n## Failed checks')
+        text += '\n### 2. Second check (error)\n**Info:**\nsecond fact\n'
+        first_row = '| 1 | error | unknown.check | Unknown check | Observed fact |'
+        swapped = text.replace(first_row + '\n' + row, row + '\n' + first_row)
+        first = a.model(text)
+        second = a.model(swapped)
+        self.assertEqual({f['source_check_id']: f['id'] for f in first['findings']},
+                         {f['source_check_id']: f['id'] for f in second['findings']})
+        self.assertEqual({f['id'] for f in first['findings']}, {c['finding_id'] for c in first['check_results']})
+
+    def test_metadata_missing_values_and_version_consistency(self):
+        report = a.model(SYNTHETIC)
+        for value in report['source_versions'].values():
+            self.assertIsNone(value['value'])
+            self.assertTrue(value['reason'])
+        finding = report['findings'][0]
+        self.assertEqual(finding['assessment'], 'unsupported')
+        self.assertIsNone(finding['approval_required'])
+        self.assertEqual(finding['affected'], [])
+        self.assertEqual(sum(report['analysis_summary']['priority_counts'].values()), len(report['findings']))
+        for body in (a.markdown(report), a.html_report(report)):
+            self.assertIn(a.VERSION, body)
+            self.assertIn(a.SCHEMA_VERSION, body)
+        generation = a.save(report, self.protected_root())
+        manifest = json.loads((generation / 'manifest.json').read_text())
+        self.assertEqual(manifest['run_id'], generation.name)
+        self.assertEqual(manifest['requested_formats'], ['html', 'markdown', 'json'])
+        self.assertEqual(manifest['parser_version'], a.PARSER_VERSION)
+        self.assertEqual(manifest['policy_version'], report['policy']['version'])
+
+    def test_individually_passed_check_does_not_request_change(self):
+        text = SYNTHETIC.replace('0 passed, 1 errors', '1 passed, 0 errors')
+        text = text.replace('| error |', '| passed |').replace('(error)', '(passed)')
+        text = text.replace('unknown.check', 'minio.cluster.min')
+        report = a.model(text)
+        finding = report['findings'][0]
+        self.assertFalse(finding['approval_required'])
+        self.assertEqual(finding['priority'], 'unclassified')
+        self.assertEqual(finding['verification_steps'], [])
+        self.assertEqual(report['official_summary']['passed'], 1)
+        self.assertEqual(len(report['check_results']), 1)
+        self.assertIn('변경 승인: 불필요', a.html_report(report))
+
+    def test_processing_and_block_limits(self):
+        with patch.object(a, 'MAX_PROCESS_SECONDS', 0), self.assertRaises(a.InputError):
+            a.model(SYNTHETIC)
+        with patch.object(a, 'MAX_BLOCKS', 1), self.assertRaises(a.InputError):
+            a.model(SYNTHETIC)
+
+    def test_output_limit_keeps_previous_generation(self):
+        root = self.protected_root()
+        report = a.model(SYNTHETIC)
+        a.save(report, root)
+        before = (root / 'CURRENT.json').read_bytes()
+        with patch.object(a, 'MAX_OUTPUT_BYTES', 1), self.assertRaises(a.OutputError):
+            a.save(report, root, force=True)
+        self.assertEqual((root / 'CURRENT.json').read_bytes(), before)
+
+    def test_each_write_failure_preserves_previous_set(self):
+        for target in ('aistor-diag-report.json', 'aistor-diag-report.md', 'aistor-diag-report.html', 'manifest.json', 'pointer'):
+            with self.subTest(stage=target):
+                root = self.protected_root()
+                report = a.model(SYNTHETIC)
+                old = a.save(report, root)
+                before = (root / 'CURRENT.json').read_bytes()
+                hashes = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in old.iterdir()}
+                original = a.write_exclusive
+                def failing_write(path, data):
+                    if path.name == target or target == 'pointer' and path.name.startswith('CURRENT-'):
+                        raise OSError('synthetic write failure')
+                    original(path, data)
+                with patch.object(a, 'write_exclusive', side_effect=failing_write), self.assertRaises(a.OutputError):
+                    a.save(report, root, force=True)
+                self.assertEqual((root / 'CURRENT.json').read_bytes(), before)
+                self.assertEqual({p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in old.iterdir()}, hashes)
+                for path in root.glob('run-*/*'):
+                    a.require_private(path)
+
+    def test_corrupt_write_and_manifest_are_not_committed(self):
+        for target in ('aistor-diag-report.html', 'manifest.json'):
+            with self.subTest(target=target):
+                root = self.protected_root()
+                report = a.model(SYNTHETIC)
+                a.save(report, root)
+                before = (root / 'CURRENT.json').read_bytes()
+                original = a.write_exclusive
+                def corrupting_write(path, data):
+                    if path.name == target:
+                        data = data.replace('validated', 'invalid') if target == 'manifest.json' else data + 'tampered'
+                    original(path, data)
+                with patch.object(a, 'write_exclusive', side_effect=corrupting_write), self.assertRaises(a.OutputError):
+                    a.save(report, root, force=True)
+                self.assertEqual((root / 'CURRENT.json').read_bytes(), before)
+
+    def test_fsync_failure_preserves_previous_pointer(self):
+        root = self.protected_root()
+        report = a.model(SYNTHETIC)
+        a.save(report, root)
+        before = (root / 'CURRENT.json').read_bytes()
+        with patch.object(a.os, 'fsync', side_effect=OSError('synthetic fsync failure')), self.assertRaises(a.OutputError):
+            a.save(report, root, force=True)
+        self.assertEqual((root / 'CURRENT.json').read_bytes(), before)
+
+    def test_insecure_and_hardlinked_lock_refused(self):
+        for hardlink in (False, True):
+            with self.subTest(hardlink=hardlink):
+                root = self.protected_root()
+                lock = root / '.output.lock'
+                a.write_exclusive(lock, '')
+                if hardlink:
+                    os.link(lock, root / 'lock-alias')
+                else:
+                    lock.chmod(0o644)
+                with self.assertRaises(a.OutputError):
+                    a.save(a.model(SYNTHETIC), root)
+                self.assertFalse((root / 'CURRENT.json').exists())
+
+    def test_real_concurrent_writers_conflict_without_overwrite(self):
+        root = self.protected_root()
+        old = a.save(a.model(SYNTHETIC), root)
+        old_hash = hashlib.sha256((old / 'aistor-diag-report.json').read_bytes()).hexdigest()
+        ctx = multiprocessing.get_context('spawn')
+        ready, release = ctx.Event(), ctx.Event()
+        process = ctx.Process(target=concurrent_writer, args=(root, ready, release))
+        process.start()
+        try:
+            self.assertTrue(ready.wait(10), 'concurrent writer did not acquire lock')
+            with self.assertRaises(a.OutputError):
+                a.save(a.model(SYNTHETIC), root, force=True)
+        finally:
+            release.set()
+            process.join(15)
+            if process.is_alive():
+                process.terminate()
+                process.join()
+        self.assertEqual(process.exitcode, 0)
+        self.assertEqual(hashlib.sha256((old / 'aistor-diag-report.json').read_bytes()).hexdigest(), old_hash)
+        pointer = json.loads((root / 'CURRENT.json').read_text())
+        self.assertNotEqual(pointer['generation'], old.name)
+        self.assertTrue((root / pointer['generation'] / 'manifest.json').is_file())
+
+    def test_malicious_variants_mask_all_structured_outputs(self):
+        attacks = ['<img src="https://example.com/tracker" onerror="alert(1)">',
+                   '<iframe src="file:///etc/passwd"></iframe>', '</script><script>alert(1)</script>',
+                   '[open](JaVaScRiPt:alert(1))', '![load](data:text/html,canary)',
+                   '[[file:///etc/passwd]]', 'password="canary with spaces"', 'Authorization: Bearer canary-bearer']
+        for attack in attacks:
+            with self.subTest(attack=attack):
+                report = a.model(SYNTHETIC.replace('Observed fact', attack))
+                for body in (a.markdown(report), a.html_report(report), json.dumps(report)):
+                    self.assertNotIn('canary with spaces', body)
+                    self.assertNotIn('canary-bearer', body)
+                html_body = a.html_report(report)
+                self.assertNotIn('<img ', html_body)
+                self.assertNotIn('<iframe ', html_body)
+                self.assertNotIn('<script>alert(1)</script>', html_body)
 
     def test_no_analyzer_network_or_shell_imports(self):
         import ast
