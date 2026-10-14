@@ -1,8 +1,8 @@
 # MinIO 진단 분석기
 
-MinIO AIStor의 진단 Markdown을 읽어 보고서를 만드는 오프라인 분석기입니다.
-현재는 **R1 구현 후보**이며, 전체 기능 개발과 운영 환경의 최종 인수는 완료되지 않았습니다.
-현재 도구 버전은 `0.1.1-r1`, 결과 스키마는 `1.1-r1`입니다.
+MinIO AIStor의 진단 Markdown과 원본 diagnostics gzip을 읽는 오프라인 분석기입니다.
+R1은 `0.1.1-r1`, R2는 `0.2.1-r2-candidate` 구현 후보입니다. 운영 최종 인수는 완료되지 않았습니다.
+분석 환경에 AIStor·mc 설치나 서버 접속은 필요 없습니다. 버전 정보는 가능한 경우 자동 추출하며 필수 사용자 입력이 아닙니다.
 
 ## 현재 기능
 
@@ -18,7 +18,9 @@ MinIO AIStor의 진단 Markdown을 읽어 보고서를 만드는 오프라인 �
 
 MinIO에 접속하거나 보고서 안의 명령을 실행하지 않습니다.
 통과 건수만으로 개별 검사 결과를 만들어내지 않습니다.
-health gzip 입력, 자체 health 규칙, 시점 비교, 메트릭·로그 분석은 아직 지원하지 않습니다.
+R2는 gzip의 단일 JSON 또는 헤더+진단 JSON을 지원합니다. 형식 버전이 낯설어도 알려진 구조를 분석합니다.
+드라이브 상태·용량 카운터·버전 일치·인증서 유효기간·THP·명시적 IOMMU 옵션·제공된 수집 오류를 점검합니다.
+시점 비교와 메트릭·로그 운영 분석은 아직 지원하지 않습니다.
 
 ## 실행 환경
 
@@ -48,6 +50,25 @@ Windows에서는 다음 WSL 경로로 열 수 있습니다.
 
 `\\wsl.localhost\<distribution>\home\<user>\minio-airgap-diag-output\<generation>\aistor-diag-report.html`.
 
+## R2 실행과 범위
+
+```bash
+python3 analyze.py --health /path/to/approved-data.json.gz --mask strict --force --allow-partial
+python3 analyze.py --health /path/to/approved-data.json.gz --official-report /path/to/approved-report.md --mask strict --force --allow-partial
+```
+
+`--allow-partial`은 자료 부족 항목을 미평가로 남기고 제한 보고서를 저장하겠다는 명시입니다.
+부분 분석은 저장에 성공해도 종료 코드 4입니다. 2는 입력 오류, 3은 저장·보호 실패입니다.
+서버 버전만 없다는 이유로 지원되는 나머지 항목의 처리를 차단하지 않습니다.
+원본 환경변수·라이선스·주소·에러 본문은 내보내지 않고 허용된 관측값과 JSON 위치만 보존합니다.
+서버/드라이브 별칭은 해당 입력 안에서만 유효하며, 다른 시점과의 안정적인 대상 ID가 아닙니다.
+용량 단위는 독립 검증하지 않았으므로 원본 카운터 범위만 비교하고 점유율·추세를 판정하지 않습니다.
+THP 초기 정책은 never 통과, always/madvise 검토 경고입니다. 실제 지연·장애나 자동 조치를 의미하지 않습니다.
+IOMMU 옵션 부재를 off로 간주하지 않습니다. pool/set 인덱스만으로 quorum·물리 장애 도메인을 계산하지 않습니다.
+인증서는 수집 시점 또는 명시한 `--as-of`에서 유효기간만 점검합니다. 신뢰체인·SAN·만료 임박 정책은 미지원입니다.
+Markdown 결합 시 알려진 Server/Endpoint 표와 수집 시각(허용 차이 120초)을 비교합니다.
+명백한 대상·시각 충돌은 거부합니다. 일치해도 같은 배포·실행을 증명했다고 주장하거나 서로의 결측값을 채우지 않습니다.
+
 ## 테스트
 
 ```bash
@@ -65,7 +86,16 @@ AISTOR_DIAG_TEST_REPORT=/path/to/approved-report.md python3 run_tests.py
 `0.1.1-r1`에서는 WSL Python 3.14, 기존 실행기 Python 3.11,
 Hermes Docker Python 3.11에서 각각 **44개 통과·실패 0개·보류 0개**를 확인했습니다.
 저장 단계별 실패 주입과 실제 프로세스 간 동시 저장 충돌 검사를 포함합니다.
-상세 범위와 남은 인수 조건은 [R1 검증 현황](R1_ACCEPTANCE.md)을 참고하세요.
+상세 R1 범위와 남은 인수 조건은 [R1 검증 현황](R1_ACCEPTANCE.md)을 참고하세요.
+R2 확장 후 Docker에서는 승인된 실제 자료와 합성 사례로 73개 테스트가 통과했습니다.
+R2의 WSL·Windows Chrome 실행은 아직 확인하지 않았으며, R1의 통과 기록을 대신 적용하지 않습니다.
+
+```bash
+AISTOR_DIAG_TEST_HEALTH=/path/to/approved-data.json.gz AISTOR_DIAG_TEST_REPORT=/path/to/approved-report.md python3 -m unittest -v run_tests test_r2
+```
+
+실제 자료 테스트는 지정된 기준 샘플(서버 3개·드라이브 기록 12개·공식 요약 31/2/2)에 대한 회귀입니다.
+자료가 없으면 해당 테스트는 건너뛰며 통과로 취급하지 않습니다. 다른 버전·규모 자료의 지원 완료 근거가 아닙니다.
 
 ### 선택적 브라우저 검증
 
