@@ -461,7 +461,7 @@ def write_exclusive(path, data):
         raise OutputError('output read-back failed')
 
 
-def save(report, out_dir, force=False):
+def save(report, out_dir, force=False, *, renderers=None):
     started = time.monotonic()
     root = secure_dir(out_dir)
     pointer = root / 'CURRENT.json'
@@ -483,8 +483,9 @@ def save(report, out_dir, force=False):
             raise OutputError('concurrent result collision')
         generation.mkdir(mode=0o700)
         require_private(generation, directory=True)
+        renderers = renderers or {'markdown': markdown, 'html': html_report}
         outputs = {'aistor-diag-report.json': json.dumps(report, ensure_ascii=False, separators=(',', ':')) + '\n',
-                   'aistor-diag-report.md': markdown(report), 'aistor-diag-report.html': html_report(report)}
+                   'aistor-diag-report.md': renderers['markdown'](report), 'aistor-diag-report.html': renderers['html'](report)}
         if sum(len(body.encode('utf-8')) for body in outputs.values()) > MAX_OUTPUT_BYTES:
             raise OutputError('output size limit exceeded')
         if time.monotonic() - started > MAX_PROCESS_SECONDS:

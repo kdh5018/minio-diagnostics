@@ -8,3 +8,5 @@
 !/run_tests.py
 !/verify_browser.cjs
 !/R1_ACCEPTANCE.md
+!/r2_health.py
+!/test_r2.py
