@@ -15,7 +15,7 @@ import zlib
 import aistordoctor as a
 import r2_enrichment as enrichment
 
-VERSION = '0.2.1-r2-candidate'
+VERSION = '0.2.2-r2-candidate'
 MAX_COMPRESSED = 32 * 1024 * 1024
 MAX_EXPANDED = 64 * 1024 * 1024
 MAX_DEPTH = 64
@@ -50,11 +50,16 @@ def decode(data):
             raise a.InputError('expanded size limit')
         text = expanded.decode('utf-8-sig')
         depth = 0
+        structural_units = string_span = atom_span = 0
         quoted = escaped = False
         for index, char in enumerate(text):
             if index % 65536 == 0 and time.monotonic() - started > SECONDS:
                 raise a.InputError('processing time limit')
             if quoted:
+                string_span += 1
+                # One Unicode character may use a pair of six-character surrogate escapes.
+                if string_span > 12 * MAX_STRING + 2:
+                    raise a.InputError('serialized string limit before decoding')
                 if escaped:
                     escaped = False
                 elif char == '\\':
@@ -63,12 +68,28 @@ def decode(data):
                     quoted = False
             elif char == '"':
                 quoted = True
+                string_span = atom_span = 0
             elif char in '[{':
                 depth += 1
+                structural_units += 1
+                atom_span = 0
                 if depth > MAX_DEPTH:
                     raise a.InputError('nesting limit')
             elif char in ']}':
                 depth -= 1
+                atom_span = 0
+            elif char in ',:':
+                structural_units += 1
+                atom_span = 0
+            elif char.isspace():
+                atom_span = 0
+            else:
+                atom_span += 1
+                if atom_span > 6 * MAX_STRING + 2:
+                    raise a.InputError('scalar token limit before decoding')
+            # Conservative lexical allocation guard; exact node count follows decode.
+            if structural_units > 2 * MAX_NODES:
+                raise a.InputError('structural token limit before decoding')
         decoder = json.JSONDecoder(object_pairs_hook=pairs, parse_constant=invalid)
         documents, pos = [], 0
         while pos < len(text):
@@ -96,7 +117,7 @@ def decode(data):
             elif isinstance(value, str) and len(value) > MAX_STRING:
                 raise a.InputError('string limit')
         body = documents[-1]
-        if len(documents) == 2 and ('version' not in documents[0] or any(k in documents[0] for k in ('minio', 'sys'))):
+        if len(documents) == 2 and any(k in documents[0] for k in ('minio', 'sys')):
             raise a.InputError('unsupported header structure')
         return body, len(documents)
     except (OSError, EOFError, UnicodeError, ValueError, RecursionError, zlib.error) as exc:
@@ -253,7 +274,7 @@ def report(body, documents=1, official_text=None, as_of=None):
     r['policy'] = {'version': 'r2-initial-1', 'profile': 'unspecified', 'official_explanations': 'r1-1'}
     r['tool_version'] = VERSION
     r['schema_version'] = '1.2-r2'
-    r['input_metadata']['parser_version'] = 'r2-structural-1'
+    r['input_metadata']['parser_version'] = 'r2-structural-2'
     r['input_metadata']['health'] = {'id': 'health-001', 'documents': documents, 'collected_at': n['collected_at'],
                                     'format_version': str(body.get('version')) if type(body.get('version')) in (str, int) and re.fullmatch(r'[0-9]{1,8}', str(body['version'])) else None,
                                     'format_policy': 'structure first; version metadata does not gate execution'}

@@ -226,6 +226,38 @@ class R2Tests(unittest.TestCase):
         self.assertTrue(all(c['official_status'] is None for c in r['check_results']))
         self.assertIn('raw source counters', r['facts']['health']['capacity_unit'])
 
+    def test_preparse_node_limit_before_decoder(self):
+        payload = gzip.compress(json.dumps({'values': [0] * 100}).encode())
+        with patch.object(h, 'MAX_NODES', 5), patch.object(h.json, 'JSONDecoder', side_effect=AssertionError('decoder must not run')), self.assertRaises(a.InputError):
+            h.decode(payload)
+
+    def test_preparse_long_string_before_decoder(self):
+        payload = gzip.compress(json.dumps({'x': 'z' * 100}).encode())
+        with patch.object(h, 'MAX_STRING', 2), patch.object(h.json, 'JSONDecoder', side_effect=AssertionError('decoder must not run')), self.assertRaises(a.InputError):
+            h.decode(payload)
+
+    def test_unicode_surrogate_escape_within_decoded_limit(self):
+        payload = gzip.compress(b'{"x":"\\ud83d\\ude00"}')
+        with patch.object(h, 'MAX_STRING', 1):
+            body, count = h.decode(payload)
+        self.assertEqual(body, {'x': '\U0001f600'})
+        self.assertEqual(count, 1)
+
+    def test_preparse_long_atom_before_decoder(self):
+        payload = gzip.compress(('{"x":0.' + '0' * 100 + '1}').encode())
+        with patch.object(h, 'MAX_STRING', 2), patch.object(h.json, 'JSONDecoder', side_effect=AssertionError('decoder must not run')), self.assertRaises(a.InputError):
+            h.decode(payload)
+
+    def test_missing_header_and_producer_versions_not_gating(self):
+        body = copy.deepcopy(SYNTHETIC)
+        del body['version']
+        del body['minio']['info']['servers'][0]['version']
+        data = gzip.compress(('{}\n' + json.dumps(body)).encode())
+        r = h.report(*h.decode(data))
+        self.assertEqual(r['run_status'], 'success')
+        self.assertIsNone(r['input_metadata']['health']['format_version'])
+        self.assertIsNone(next(c for c in r['check_results'] if c['rule_id'] == 'r2.version.consistency')['rule_result'])
+
     def test_no_network_or_shell_imports(self):
         tree = ast.parse(Path(h.__file__).read_text())
         for node in ast.walk(tree):
