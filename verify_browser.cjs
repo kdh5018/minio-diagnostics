@@ -36,7 +36,11 @@ async function main() {
       const values = await page.locator(`${select} option`).evaluateAll(options => options.map(option => option.value));
       for (const value of values) {
         await page.locator(select).selectOption(value);
-        const expected = report.findings.filter(finding => !value || finding[field] === value).length;
+        const expected = report.findings.filter(finding => {
+          const actualField = field === 'official_status' && finding.origin === 'custom_rule'
+            ? '해당 없음 / 자체 결과: ' + (finding.rule_result || '미평가') : finding[field];
+          return !value || actualField === value;
+        }).length;
         const actual = await page.locator('article:visible').count();
         assert.equal(actual, expected);
         cases.push({ select, value, expected, actual });
@@ -45,16 +49,21 @@ async function main() {
     }
     await page.locator('#q').fill('no-such-finding-7fbf28');
     assert.equal(await page.locator('article:visible').count(), 0);
-    await page.locator('#q').fill(report.findings[0].title);
-    assert((await page.locator('article:visible').count()) > 0);
+    if (report.findings.length) {
+      await page.locator('#q').fill(report.findings[0].title);
+      assert((await page.locator('article:visible').count()) > 0);
+    }
     await page.locator('#q').fill('');
     await page.locator('#q').focus();
     await page.keyboard.press('Tab');
     assert.equal(await page.locator('#s').evaluate(element => element === document.activeElement), true);
     const disclosure = page.locator('details').first();
-    await disclosure.locator('summary').focus();
-    await page.keyboard.press('Enter');
-    assert.equal(await disclosure.getAttribute('open'), '');
+    const hasDisclosure = (await disclosure.count()) > 0;
+    if (hasDisclosure) {
+      await disclosure.locator('summary').focus();
+      await page.keyboard.press('Enter');
+      assert.equal(await disclosure.getAttribute('open'), '');
+    }
     if (report.findings.some(finding => finding.evidence_blocks.some(block => block.type === 'table'))) {
       assert((await page.locator('table').count()) > 0);
     }
@@ -87,7 +96,7 @@ async function main() {
     const result = {
       browser: browser.version(), protocol: 'file:', toolVersion: report.tool_version,
       inputGeneration: path.basename(path.dirname(htmlPath)), filters: cases,
-      search: 'passed', keyboardDisclosure: 'passed', printLayout: 'passed',
+      search: 'passed', keyboardDisclosure: hasDisclosure ? 'passed' : 'not_applicable', printLayout: 'passed',
       hostileMarkup: 'passed', desktop, mobile, externalRequests, pageErrors, consoleErrors,
       scope: 'Application-page requests only; not Chrome background services or every Markdown viewer.',
     };

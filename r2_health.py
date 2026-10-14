@@ -13,8 +13,9 @@ import time
 import zlib
 
 import aistordoctor as a
+import r2_enrichment as enrichment
 
-VERSION = '0.2.0-r2-candidate'
+VERSION = '0.2.1-r2-candidate'
 MAX_COMPRESSED = 32 * 1024 * 1024
 MAX_EXPANDED = 64 * 1024 * 1024
 MAX_DEPTH = 64
@@ -95,7 +96,7 @@ def decode(data):
             elif isinstance(value, str) and len(value) > MAX_STRING:
                 raise a.InputError('string limit')
         body = documents[-1]
-        if len(documents) == 2 and set(documents[0]) != {'version'}:
+        if len(documents) == 2 and ('version' not in documents[0] or any(k in documents[0] for k in ('minio', 'sys'))):
             raise a.InputError('unsupported header structure')
         return body, len(documents)
     except (OSError, EOFError, UnicodeError, ValueError, RecursionError, zlib.error) as exc:
@@ -123,7 +124,7 @@ def stamp(value):
 
 
 def release(value):
-    if not isinstance(value, str):
+    if not isinstance(value, str) or len(value) > 100:
         return None
     candidate = value.removeprefix('RELEASE.')
     if re.fullmatch(r'v?[0-9]+(?:\.[0-9]+){1,3}', candidate) or stamp(candidate):
@@ -182,7 +183,9 @@ def normalize(body):
                   'collected_at': collected.isoformat() if collected else None,
                   'record_identity_scope': 'input-local aliases; not stable cross-snapshot identities',
                   'capacity_unit': 'raw source counters; byte unit not independently verified',
-                  'excluded': ['environment_variables', 'configuration_values', 'license_data', 'raw_errors', 'endpoints', 'deployment_identifiers']}
+                  'excluded': ['environment_variables', 'unselected_configuration_values', 'license_data', 'raw_errors', 'endpoints', 'deployment_identifiers']}
+    configurations, collection, topology = enrichment.extract(body, normalized, number)
+    normalized.update(system_configurations=configurations, collection=collection, topology=topology)
     return normalized, sorted(set(notes))
 
 
@@ -236,7 +239,10 @@ def evaluate(n, as_of=None):
 
 def report(body, documents=1, official_text=None, as_of=None):
     n, notes = normalize(body)
-    checks = evaluate(n, as_of)
+    checks = evaluate(n, as_of) + enrichment.system_rules(n)
+    pairing = enrichment.link(body, official_text, stamp)
+    if pairing['status'] == 'conflict':
+        raise a.InputError('health/Markdown evidence conflict; no combined report')
     if official_text is not None:
         r = a.model(official_text)
     else:
@@ -255,9 +261,12 @@ def report(body, documents=1, official_text=None, as_of=None):
     r['source_versions']['mc'] = {'value': None, 'reason': 'not_identified; not_required_for_file_analysis'}
     r['facts']['health'] = n
     r['coverage'].update(health='allowlisted_minio_info_subset', topology='indices_only; no quorum or failure-domain inference',
-                         configuration='not_normalized_yet', collection_errors='not_evaluated', comparison='not_supported', operational_analysis='not_supported')
-    r['input_link'] = {'status': 'independent_inputs' if official_text else 'health_only',
-                       'reason': 'no forced field filling or same-deployment assertion; correspondence verification remains pending'}
+                         configuration='allowlisted_thp_iommu_rlimit', collection_errors='recognized_sys_arrays_only', comparison='not_supported', operational_analysis='not_supported')
+    r['input_link'] = pairing
+    if pairing['status'] == 'insufficient_evidence':
+        notes.append('input correspondence evidence insufficient')
+    if n['collection']['reported_error_count']:
+        notes.append('reported collector errors; source coverage incomplete')
     r['parser_errors'].extend(notes)
     r['check_results'].extend(checks)
     for c in checks:
@@ -269,10 +278,10 @@ def report(body, documents=1, official_text=None, as_of=None):
             impact='현재 서비스 상태·데이터 안전성·원인을 확정하지 않습니다.', approval_required=True if c['rule_result'] else None,
             verification_steps=['필요한 입력과 의미를 확인한 뒤 동일 조건으로 재점검합니다.'], limitations=[c['condition']]))
     r['analysis_summary'] = {'custom_rule_counts': dict(Counter(c['rule_result'] or 'not_evaluated' for c in checks)),
-                             'custom_rule_catalog': CATALOG}
-    partial = bool(r['parser_errors']) or any(c['rule_result'] is None for c in checks)
+                             'custom_rule_catalog': {c['rule_id']: {'version': c['rule_version'], 'required_inputs': c['required_inputs'], 'condition': c['condition']} for c in checks}}
+    partial = bool(r['parser_errors']) or any(c['rule_result'] is None for c in checks if c['rule_id'] != 'r2.version.consistency')
     r['run_status'] = 'partial' if partial else 'success'
-    r['completeness'] = {'source_coverage': 'explicit_allowlist_subset', 'requested_scope_satisfied': not partial,
+    r['completeness'] = {'source_coverage': 'explicit_allowlist_subset', 'requested_scope_satisfied': not partial and all(c['rule_result'] is not None for c in checks),
                          'limitations': '범위 밖 필드는 미지원입니다. success는 수집 완전성·시스템 정상 판정이 아닙니다.'}
     return r
 
@@ -282,14 +291,25 @@ def view(r):
     v = copy.deepcopy(r)
     for f in v['findings']:
         if f['origin'] == 'custom_rule':
-            f['official_status'] = '해당 없음 / 자체 결과: ' + str(f['rule_result'])
+            f['official_status'] = '해당 없음 / 자체 결과: ' + (f['rule_result'] or '미평가')
     v['facts']['custom_check_results'] = r['check_results']
     return v
+
+
+def html_report(r):
+    v = view(r)
+    body = a.html_report(v)
+    labels = sorted({f['official_status'] for f in v['findings'] if f['origin'] == 'custom_rule'})
+    options = ''.join('<option>' + a.html.escape(label) + '</option>' for label in labels)
+    body = body.replace('<option>passed</option>', '<option>passed</option>' + options)
+    body = body.replace('<option>미분류</option>', '<option>미분류</option><option>용량</option>')
+    return body.replace('<label>공식 상태 ', '<label>공식/자체 결과 ')
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description='R2 offline health subset analyzer')
     parser.add_argument('--health', type=Path, required=True)
+    parser.add_argument('--version', action='version', version=VERSION)
     parser.add_argument('--official-report', type=Path)
     parser.add_argument('--out-dir', type=Path, default=a.DEFAULT_OUTPUT_DIR)
     parser.add_argument('--mask', choices=('strict',), default='strict')
@@ -321,7 +341,7 @@ def main(argv=None):
             if source and (source.resolve() == args.out_dir.resolve() or source.resolve() == (args.out_dir / 'CURRENT.json').resolve()):
                 raise a.OutputError('input/output collision')
         generation = a.save(r, args.out_dir, args.force, renderers={
-            'markdown': lambda x: a.markdown(view(x)), 'html': lambda x: a.html_report(view(x))})
+            'markdown': lambda x: a.markdown(view(x)), 'html': html_report})
         print('R2 결과 세트 확정: ' + str(generation))
     except (a.OutputError, OSError):
         print('R2 저장 실패: 기존 확정 세트를 보존합니다.', file=sys.stderr)

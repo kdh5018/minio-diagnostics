@@ -9,4 +9,5 @@
 !/verify_browser.cjs
 !/R1_ACCEPTANCE.md
 !/r2_health.py
+!/r2_enrichment.py
 !/test_r2.py

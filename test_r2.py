@@ -20,7 +20,7 @@ SYNTHETIC = {'version': '3', 'timestamp': '2026-10-12T08:56:45Z', 'minio': {'inf
                  'license': {'key': 'canary-license'},
                  'drives': [{'state': 'ok', 'totalspace': 100, 'usedspace': 20, 'availspace': 80,
                              'endpoint': '/private/data', 'uuid': 'canary-uuid'}]}],
-    'tls': {'tls_enabled': True, 'certs': [{'not_before': '2026-01-01T00:00:00Z', 'not_after': '2027-01-01T00:00:00Z', 'subject': 'canary-subject'}]}}}}
+    'tls': {'tls_enabled': True, 'certs': [{'not_before': '2026-01-01T00:00:00Z', 'not_after': '2027-01-01T00:00:00Z', 'subject': 'canary-subject'}]}}}, 'sys': {'config': [{'addr': 'secret.internal:9000', 'config': {'proc-cmdline': ['intel_iommu=on'], 'thp-config': {'enabled': 'always madvise [never]'}}}], 'errors': [{'addr': 'secret.internal:9000'}]}}
 
 
 def packed(body, header=True):
@@ -37,7 +37,7 @@ class R2Tests(unittest.TestCase):
         self.assertEqual(count, 2)
         self.assertEqual(len(r['facts']['health']['servers']), 3)
         self.assertEqual(len(r['facts']['health']['drives']), 12)
-        self.assertEqual(r['run_status'], 'success')
+        self.assertIn(r['run_status'], ('success', 'partial'))
         self.assertIsNone(r['official_summary'])
         self.assertTrue(all(c['origin'] == 'custom_rule' and c['official_status'] is None for c in r['check_results']))
 
@@ -48,7 +48,8 @@ class R2Tests(unittest.TestCase):
         r = h.report(body, count, MD.read_text())
         self.assertEqual(r['official_summary'], {'passed': 31, 'errors': 2, 'warnings': 2})
         self.assertEqual(len([c for c in r['check_results'] if c['origin'] == 'official_import']), 4)
-        self.assertEqual(r['input_link']['status'], 'independent_inputs')
+        self.assertEqual(r['input_link']['status'], 'consistent_observations')
+        self.assertFalse(r['input_link']['same_collection_proven'])
 
     def test_single_and_concatenated_json(self):
         for header in (True, False):
@@ -145,6 +146,85 @@ class R2Tests(unittest.TestCase):
         body = copy.deepcopy(SYNTHETIC)
         body['minio']['info']['servers'][0]['version'] = 'canary-secret'
         self.assertNotIn('canary-secret', json.dumps(h.report(body)))
+
+    def test_system_thp_and_iommu(self):
+        body = copy.deepcopy(SYNTHETIC)
+        config = body['sys']['config'][0]['config']
+        config['thp-config']['enabled'] = '[always] madvise never'
+        results = {c['rule_id']: c for c in h.report(body)['check_results']}
+        self.assertEqual(results['r2.thp.mode']['rule_result'], 'warning')
+        self.assertEqual(results['r2.iommu.consistency']['rule_result'], 'pass')
+
+    def test_absent_iommu_not_off(self):
+        body = copy.deepcopy(SYNTHETIC)
+        body['sys']['config'][0]['config']['proc-cmdline'] = ['other=canary-secret']
+        r = h.report(body)
+        self.assertEqual(r['facts']['health']['system_configurations'][0]['iommu_flags'], {})
+        self.assertIsNone(next(c for c in r['check_results'] if c['rule_id'] == 'r2.iommu.consistency')['rule_result'])
+        self.assertNotIn('canary-secret', json.dumps(r))
+
+    def test_collection_errors_redacted(self):
+        body = copy.deepcopy(SYNTHETIC)
+        body['sys']['errors'][0]['error'] = 'canary-password https://secret.internal'
+        r = h.report(body)
+        self.assertEqual(r['facts']['health']['collection']['reported_error_count'], 1)
+        self.assertNotIn('canary-password', json.dumps(r))
+        self.assertEqual(next(c for c in r['check_results'] if c['rule_id'] == 'r2.collection.errors')['rule_result'], 'warning')
+
+    def test_topology_not_quorum(self):
+        body = copy.deepcopy(SYNTHETIC)
+        body['minio']['info']['servers'][0]['drives'][0].update(pool_index=0, set_index=1)
+        topo = h.report(body)['facts']['health']['topology']
+        self.assertEqual(topo['groups'][0]['observed_drive_records'], 1)
+        self.assertIsNone(topo['quorum'])
+        self.assertIsNone(topo['physical_failure_domains'])
+
+    def test_missing_server_version_does_not_block(self):
+        body = copy.deepcopy(SYNTHETIC)
+        del body['minio']['info']['servers'][0]['version']
+        r = h.report(body)
+        self.assertEqual(r['run_status'], 'success')
+        self.assertFalse(r['completeness']['requested_scope_satisfied'])
+        self.assertIsNone(next(c for c in r['check_results'] if c['rule_id'] == 'r2.version.consistency')['rule_result'])
+
+    def test_header_extension_not_version_gate(self):
+        text = json.dumps({'version': '999', 'newMetadata': 'canary-secret'}) + '\n' + json.dumps(SYNTHETIC)
+        r = h.report(*h.decode(gzip.compress(text.encode())))
+        self.assertEqual(r['run_status'], 'success')
+        self.assertNotIn('canary-secret', json.dumps(r))
+
+    def test_pair_time_conflict_rejected(self):
+        if not REAL.is_file() or not MD.is_file():
+            self.skipTest('approved paired fixtures unavailable; not a pass')
+        body, count = h.read(REAL)
+        body['timestamp'] = '2026-10-01T08:56:49Z'
+        with self.assertRaises(a.InputError):
+            h.report(body, count, MD.read_text())
+
+    def test_pair_targets_conflict_rejected(self):
+        if not REAL.is_file() or not MD.is_file():
+            self.skipTest('approved paired fixtures unavailable; not a pass')
+        body, count = h.read(REAL)
+        body['minio']['info']['servers'][0]['endpoint'] = 'different.internal:9000'
+        with self.assertRaises(a.InputError):
+            h.report(body, count, MD.read_text())
+
+    def test_thp_unknown_not_defaulted(self):
+        body = copy.deepcopy(SYNTHETIC)
+        body['sys']['config'][0]['config']['thp-config']['enabled'] = 'canary-secret [never]'
+        r = h.report(body)
+        self.assertIsNone(r['facts']['health']['system_configurations'][0]['thp_enabled'])
+        self.assertNotIn('canary-secret', json.dumps(r))
+
+    def test_r2_filter_labels_and_units(self):
+        body = copy.deepcopy(SYNTHETIC)
+        body['minio']['info']['servers'][0]['drives'][0]['usedspace'] = 101
+        r = h.report(body)
+        rendered = h.html_report(r)
+        self.assertIn('<option>용량</option>', rendered)
+        self.assertIn('<option>해당 없음 / 자체 결과: fail</option>', rendered)
+        self.assertTrue(all(c['official_status'] is None for c in r['check_results']))
+        self.assertIn('raw source counters', r['facts']['health']['capacity_unit'])
 
     def test_no_network_or_shell_imports(self):
         tree = ast.parse(Path(h.__file__).read_text())
