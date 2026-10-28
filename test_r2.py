@@ -258,6 +258,56 @@ class R2Tests(unittest.TestCase):
         self.assertIsNone(r['input_metadata']['health']['format_version'])
         self.assertIsNone(next(c for c in r['check_results'] if c['rule_id'] == 'r2.version.consistency')['rule_result'])
 
+    def test_observation_tables_do_not_change_diagnoses(self):
+        report = h.report(copy.deepcopy(SYNTHETIC))
+        before = copy.deepcopy(report)
+        rendered = h.html_report(report)
+        self.assertEqual(report, before)
+        for label in ('원본 관측 정보', '서버 기록', '드라이브 기록', '원본 수집 오류', '수집 범위·미지원·결합 제한'):
+            self.assertIn(label, rendered)
+        self.assertEqual(rendered.count('<article '), len(report['findings']))
+
+    def test_six_collection_errors_shown_separately(self):
+        body = copy.deepcopy(SYNTHETIC)
+        body['sys']['cpus'] = [{'error': 'canary-cpu-secret'} for _ in range(3)]
+        body['sys']['netinfo'] = [{'error': 'canary-nic-secret'} for _ in range(3)]
+        report = h.report(body)
+        rendered = h.html_report(report)
+        self.assertEqual(report['facts']['health']['collection']['reported_error_count'], 6)
+        self.assertIn('오류가 기록된 행 수: <strong>6</strong>', rendered)
+        self.assertIn('<td>CPU 정보</td><td>3</td><td>3</td>', rendered)
+        self.assertIn('<td>네트워크 정보</td><td>3</td><td>3</td>', rendered)
+        self.assertNotIn('canary-cpu-secret', rendered)
+        self.assertNotIn('canary-nic-secret', rendered)
+        self.assertIsNone(report['official_summary'])
+
+    def test_missing_observations_not_zero(self):
+        body = copy.deepcopy(SYNTHETIC)
+        del body['minio']['info']['servers'][0]['drives'][0]['totalspace']
+        del body['sys']['errors']
+        report = h.report(body)
+        self.assertIsNone(report['facts']['health']['collection']['reported_error_count'])
+        rendered = h.observations_html(report)
+        self.assertIn('오류가 기록된 행 수: <strong>미제공 / 미평가</strong>', rendered)
+        self.assertIn('미제공 / 미지원', rendered)
+
+    def test_observation_table_escapes_untrusted_values(self):
+        report = h.report(SYNTHETIC)
+        report['facts']['health']['servers'][0]['id'] = '<img src=x onerror=alert(1)>'
+        rendered = h.observations_html(report)
+        self.assertNotIn('<img', rendered)
+        self.assertIn('&lt;img', rendered)
+
+    def test_actual_collection_counts_when_fixture_present(self):
+        if not REAL.is_file():
+            self.skipTest('approved actual health fixture unavailable; not a pass')
+        report = h.report(*h.read(REAL))
+        collection = report['facts']['health']['collection']
+        self.assertEqual(collection['reported_error_count'], 6)
+        self.assertEqual(collection['sections']['cpus']['reported_errors'], 3)
+        self.assertEqual(collection['sections']['netinfo']['reported_errors'], 3)
+        self.assertIn('오류가 기록된 행 수: <strong>6</strong>', h.html_report(report))
+
     def test_no_network_or_shell_imports(self):
         tree = ast.parse(Path(h.__file__).read_text())
         for node in ast.walk(tree):

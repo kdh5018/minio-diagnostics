@@ -317,9 +317,48 @@ def view(r):
     return v
 
 
+def observations_html(r):
+    """Presentation only: render allowlisted observations, never new diagnoses."""
+    n = r.get('facts', {}).get('health')
+    if not isinstance(n, dict):
+        return ''
+    esc = lambda value: a.html.escape(str(value), quote=True)
+    def value(item):
+        return '미제공 / 미평가' if item is None else esc(item)
+    def table(headers, rows):
+        head = '<tr>' + ''.join('<th>' + esc(x) + '</th>' for x in headers) + '</tr>'
+        body = ''.join('<tr>' + ''.join('<td>' + value(x) + '</td>' for x in row) + '</tr>' for row in rows)
+        return '<div class="table-scroll"><table>' + head + body + '</table></div>'
+    sections = ['<section id="raw-observations"><h2>원본 관측 정보 (공식 판정과 별도)</h2>',
+                '<p>원본 수집 시각: ' + value(n.get('collected_at')) + '</p>',
+                '<p>서버·드라이브 수는 제공된 기록 수입니다. 물리 서버·장애 도메인·quorum을 뜻하지 않습니다.</p>',
+                '<h3>서버 기록</h3>']
+    sections.append(table(['대상 별칭', '관측 버전', '원본 JSON 위치'],
+        [(s['id'], s['version'], s['source_locator']['json_path']) for s in n['servers']]))
+    sections.extend(['<h3>드라이브 기록</h3>', '<p>용량은 원본 카운터입니다. 단위·점유율·성능을 확정하지 않습니다.</p>'])
+    sections.append(table(['드라이브 별칭', '서버 별칭', '관측 상태', 'totalspace', 'usedspace', 'availspace', '원본 JSON 위치'],
+        [(d['id'], d['server_id'], d['state'], d['totalspace'], d['usedspace'], d['availspace'], d['source_locator']['json_path']) for d in n['drives']]))
+    collection = n['collection']
+    sections.extend(['<h3>원본 수집 오류 (공식 검사 오류와 별도)</h3>',
+        '<p>지원 필드에서 오류가 기록된 행 수: <strong>' + value(collection['reported_error_count']) + '</strong></p>',
+        '<p>오류 본문·내부 주소는 내보내지 않습니다. 기록이 없다는 것은 전체 수집 성공의 증거가 아닙니다.</p>'])
+    labels = {'cpus': 'CPU 정보', 'netinfo': '네트워크 정보', 'partitions': '파티션', 'osinfo': 'OS 정보',
+              'meminfo': '메모리', 'procinfo': '프로세스', 'errors': '시스템 오류', 'services': '서비스', 'config': '설정'}
+    sections.append(table(['수집 영역', '제공 기록 수', '오류 기록 행 수', '입력 지원 상태', '원본 JSON 위치'],
+        [(labels.get(k, k), v['records'], v['reported_errors'],
+          '제공' if v['status'] == 'provided' else '미제공 / 미지원', '$.sys.' + k)
+         for k, v in collection['sections'].items()]))
+    sections.extend(['<details><summary>수집 범위·미지원·결합 제한</summary><pre>' +
+        esc(a.json.dumps({'collection_scope': collection['scope'], 'coverage': r['coverage'],
+                         'input_link': r['input_link'], 'parser_notes': r['parser_errors']}, ensure_ascii=False, indent=2)) +
+        '</pre></details></section>'])
+    return ''.join(sections)
+
+
 def html_report(r):
     v = view(r)
     body = a.html_report(v)
+    body = body.replace('<div class="filters">', observations_html(r) + '<div class="filters">', 1)
     labels = sorted({f['official_status'] for f in v['findings'] if f['origin'] == 'custom_rule'})
     options = ''.join('<option>' + a.html.escape(label) + '</option>' for label in labels)
     body = body.replace('<option>passed</option>', '<option>passed</option>' + options)
