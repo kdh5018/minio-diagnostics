@@ -743,6 +743,80 @@ class ReleasePackagingTests(unittest.TestCase):
         p = subprocess.run([BASH, str(BUILD), '--scan-only', str(clean)], capture_output=True, text=True, timeout=60)
         self.assertEqual(p.returncode, 0, p.stderr)
 
+    # -- 0.4.3 남은 항목 회귀 테스트 --------------------------------------------
+    CURL_SHIM = '''#!/bin/sh
+# 시험용 curl: -o 대상에 SHIM_MODE에 따라 일부·잘못된·올바른 내용을 쓴다(네트워크 없음).
+out=
+while [ $# -gt 0 ]; do [ "$1" = -o ] && { out=$2; shift; }; shift; done
+case $SHIM_MODE in
+    fail) printf partial > "$out"; exit 22 ;;
+    wrong) printf 'not the pinned file' > "$out"; exit 0 ;;
+    ok) cat "$SHIM_SRC" > "$out"; exit 0 ;;
+esac
+exit 99
+'''
+
+    def fetch_build(self, mode, cache, runtime, runtime_from_cache=True):
+        shim = self.base / 'shim'
+        shim.mkdir(exist_ok=True)
+        (shim / 'curl').write_text(self.CURL_SHIM, encoding='utf-8')
+        (shim / 'curl').chmod(0o755)
+        archive, digest = runtime
+        cmd = [BASH, str(BUILD), '--os', 'el8', '--arch', 'x86_64', '--runtime-sha256', digest, '--cache-dir', str(cache),
+               '--allow-dirty', '--skip-runtime-exec', '--out-dir', str(self.base / ('dist-' + mode))]
+        if runtime_from_cache:
+            cmd += ['--license-dir', str(self.fake_licenses()), '--allow-unverified-licenses']
+        else:
+            cmd += ['--runtime-archive', str(archive)]
+        env = dict(os.environ, TMPDIR=str(self.base), SOURCE_DATE_EPOCH='1791763200', SHIM_MODE=mode, SHIM_SRC=str(archive),
+                   PATH=str(shim) + ':' + os.environ.get('PATH', '/usr/bin:/bin'))
+        return subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=300)
+
+    def test_failed_or_wrong_download_never_reaches_cache(self):
+        runtime = self.fake_runtime()
+        for mode in ('fail', 'wrong'):
+            with self.subTest(mode=mode):
+                cache = self.base / ('cache-' + mode)
+                p = self.fetch_build(mode, cache, runtime)
+                self.assertNotEqual(p.returncode, 0, p.stdout)
+                self.assertEqual(sorted(x.name for x in cache.iterdir()) if cache.exists() else [], [], p.stderr)
+                if mode == 'wrong':
+                    self.assertIn('SHA-256 불일치', p.stderr)
+        # 라이선스 원문 내려받기 실패도 같은 함수로 처리되어 캐시에 아무것도 남지 않는다.
+        cache = self.base / 'cache-license'
+        p = self.fetch_build('fail', cache, runtime, runtime_from_cache=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertEqual(sorted(x.name for x in cache.iterdir()) if cache.exists() else [], [], p.stderr)
+        # 올바른 내용이면 해시 확인 뒤 최종 이름으로만 캐시에 들어간다.
+        cache = self.base / 'cache-ok'
+        p = self.fetch_build('ok', cache, runtime)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        names = sorted(x.name for x in cache.iterdir())
+        self.assertEqual(len(names), 1, names)
+        self.assertTrue(names[0].endswith('-install_only_stripped.tar.gz'), names)
+        name = names[0]
+        self.assertEqual((cache / name).read_bytes(), runtime[0].read_bytes())
+
+    def test_system_python_minimum_has_one_source(self):
+        # 최소 버전은 run-report.sh 한 곳에만 있고, RELEASE-INFO와 README-ko는 그 값으로 만든다.
+        copy = self.base / 'src-pymin'
+        copy.mkdir()
+        for name in APP_FILES + ('run-report.sh', 'LICENSE', 'build-release.sh'):
+            shutil.copy2(ROOT / name, copy / name)
+        run = (copy / 'run-report.sh').read_text(encoding='utf-8')
+        self.assertEqual(run.count('readonly DEFAULT_SYSTEM_PYTHON_MIN=3.9\n'), 1)
+        (copy / 'run-report.sh').write_text(run.replace('DEFAULT_SYSTEM_PYTHON_MIN=3.9', 'DEFAULT_SYSTEM_PYTHON_MIN=3.11'), encoding='utf-8')
+        p, out = self.build(script=copy / 'build-release.sh', out=self.base / 'dist-pymin')
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        tarball = next(out.glob('*.tar.gz'))
+        top = tarball.name[:-len('.tar.gz')]
+        with tarfile.open(tarball, 'r:gz') as tar:
+            info = tar.extractfile(top + '/RELEASE-INFO').read().decode('utf-8')
+            readme = tar.extractfile(top + '/README-ko.txt').read().decode('utf-8')
+        self.assertIn('SYSTEM_PYTHON_MIN=3.11\n', info)
+        self.assertIn('python3 3.11 이상', readme)
+        self.assertNotIn('3.9', readme)
+
 
 def verify_release_tarball(test, tarball, fake_runtime=False):
     with tarfile.open(tarball, 'r:gz') as tar:

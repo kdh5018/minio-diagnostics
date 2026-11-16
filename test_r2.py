@@ -529,6 +529,48 @@ class R2Tests(unittest.TestCase):
             self.assertIn('/proc/cmdline', text)
             self.assertNotIn('svc.cluster.local', text)
 
+    # -- 0.4.3 남은 항목 회귀 테스트 --------------------------------------------
+    TLS_PAIRED_MD = PAIRED_MD.replace('unknown.check', 'minio.net.tls.valid').replace(
+        '**Info:**', 'Certificate valid from 2026-01-01T00:00:00Z until 2026-10-21T01:56:42Z\n**Info:**')
+
+    def test_combined_as_of_reaches_official_part(self):
+        # 0.4.3: 결합 실행의 --as-of가 공식 보고서 부분(인증서 남은 시간·기준 시각)에도 적용된다.
+        explicit = h.report(copy.deepcopy(SYNTHETIC), 1, self.TLS_PAIRED_MD, '2026-10-20T01:56:42Z')
+        meta, facts = explicit['input_metadata'], explicit['facts']
+        self.assertEqual(meta['as_of_origin'], 'explicit')
+        self.assertEqual(meta['as_of'], '2026-10-20T01:56:42+00:00')
+        self.assertEqual(facts['certificate_remaining_seconds'], 86400)
+        self.assertIn('인증서 남은 시간(--as-of 지정 시각 기준)', h.markdown_report(explicit))
+        # --as-of 없음: 지금과 같이 수집 시각 기준.
+        default = h.report(copy.deepcopy(SYNTHETIC), 1, self.TLS_PAIRED_MD)
+        self.assertEqual(default['input_metadata']['as_of_origin'], 'collection')
+        self.assertEqual(default['facts']['certificate_remaining_seconds'],
+                         int((a.aware_time('2026-10-21T01:56:42Z') - a.aware_time('2026-10-12T08:56:49Z')).total_seconds()))
+
+    def test_input_hardlinked_as_current_json_refused_like_r1(self):
+        # 0.4.3: R1과 같은 공용 점검. 입력이 출력 폴더의 CURRENT.json과 같은 파일(하드링크)이면 종료 코드 3.
+        for kind in ('official', 'health'):
+            with self.subTest(kind=kind):
+                root = self.workdir()
+                md, gz, out = root / 'in.md', root / 'in.json.gz', a.secure_dir(root / 'out')
+                md.write_text(PAIRED_MD, encoding='utf-8')
+                gz.write_bytes(packed(SYNTHETIC))
+                os.link(md if kind == 'official' else gz, out / 'CURRENT.json')
+                before = (md.read_bytes(), gz.read_bytes())
+                rc, stdout, err = self.run_main('--health', str(gz), '--official-report', str(md),
+                                                '--out-dir', str(out), '--allow-partial', '--force')
+                self.assertEqual(rc, 3, stdout + err)
+                self.assertIn(a.OUTPUT_FAILURE_MESSAGE, err)
+                self.assertEqual((md.read_bytes(), gz.read_bytes()), before)
+                self.assertEqual([p.name for p in out.iterdir()], ['CURRENT.json'])
+                # R1도 같은 공용 함수·메시지를 쓴다.
+                if kind == 'official':
+                    import contextlib, io
+                    e1 = io.StringIO()
+                    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(e1):
+                        self.assertEqual(a.main(['--official-report', str(md), '--out-dir', str(out), '--force']), 3)
+                    self.assertIn(a.OUTPUT_FAILURE_MESSAGE, e1.getvalue())
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

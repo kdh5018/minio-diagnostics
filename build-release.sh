@@ -226,19 +226,34 @@ SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$SOURCE_EPOCH}
 BUILD_DATE=$(date -u -d "@$SOURCE_DATE_EPOCH" +%Y-%m-%dT%H:%M:%SZ)
 R1_VERSION=$(sed -n "s/^VERSION = '\(.*\)'.*/\1/p" "$ROOT/aistordoctor.py" | head -n 1)
 R2_VERSION=$(sed -n "s/^VERSION = '\(.*\)'.*/\1/p" "$ROOT/r2_health.py" | head -n 1)
+# 시스템 python3 최소 버전의 원본은 run-report.sh 한 곳이다(RELEASE-INFO·README-ko는 여기서 만든다).
+SYSTEM_PYTHON_MIN=$(sed -n 's/^readonly DEFAULT_SYSTEM_PYTHON_MIN=\([0-9][0-9.]*\)$/\1/p' "$ROOT/run-report.sh")
+[ -n "$SYSTEM_PYTHON_MIN" ] || die "run-report.sh에서 DEFAULT_SYSTEM_PYTHON_MIN을 찾지 못했습니다."
+
+LICENSE_WORK=$(mktemp -d "${TMPDIR:-/tmp}/aistor-lic.XXXXXX")
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/aistor-build.XXXXXX")
+FETCH_TMP=
+trap 'rm -rf -- "$WORK" "$LICENSE_WORK"; [ -z "$FETCH_TMP" ] || rm -f -- "$FETCH_TMP"' EXIT
 
 # ---------------------------------------------------------------- 런타임 확보
-fetch() {  # fetch <url> <파일> <표시 접두어> <curl·wget이 없을 때 안내>
-    local tmp=$2.part
-    echo "${3}내려받기(개발 환경): $1"
+# 받는 동안은 캐시 폴더 안 임시 파일에 쓰고, 고정 SHA-256이 맞을 때만 최종 이름으로 옮긴다(같은 파일 시스템 mv).
+# 실패·불일치면 임시 파일을 지우고 멈춘다. 중간에 끊겨도 EXIT trap이 지운다.
+fetch() {  # fetch <url> <캐시 파일> <고정 SHA-256> <표시 접두어> <curl·wget이 없을 때 안내>
+    local got ok=0
+    FETCH_TMP=$(mktemp "$2.part.XXXXXX")
+    echo "${4}내려받기(개발 환경): $1"
     if command -v curl >/dev/null 2>&1; then
-        curl -fL --retry 3 -o "$tmp" "$1"
+        curl -fL --retry 3 -o "$FETCH_TMP" "$1" && ok=1
     elif command -v wget >/dev/null 2>&1; then
-        wget -O "$tmp" "$1"
+        wget -O "$FETCH_TMP" "$1" && ok=1
     else
-        die "curl·wget이 없습니다. $4"
+        die "curl·wget이 없습니다. $5"
     fi
-    mv -f -- "$tmp" "$2"
+    [ "$ok" -eq 1 ] || die "${4}내려받기 실패: $1 (캐시에 남기지 않음)"
+    got=$(sha256sum -- "$FETCH_TMP" | cut -d' ' -f1)
+    [ "$got" = "$3" ] || die "${4}내려받은 파일 SHA-256 불일치: $got (기대 $3, 캐시에 남기지 않음)"
+    mv -f -- "$FETCH_TMP" "$2"
+    FETCH_TMP=
 }
 RUNTIME_SHA256=${RUNTIME_SHA256_OVERRIDE:-$RUNTIME_SHA256_PINNED}
 case $RUNTIME_SHA256 in
@@ -248,9 +263,8 @@ esac
 if [ -z "$RUNTIME_ARCHIVE" ]; then
     mkdir -p -- "$CACHE_DIR"
     RUNTIME_ARCHIVE=$CACHE_DIR/$RUNTIME_FILE
-    # if 안에서 호출해 set -e가 내려받기 실패에서 바로 멈추게 한다.
     if [ ! -f "$RUNTIME_ARCHIVE" ]; then
-        fetch "$RUNTIME_URL" "$RUNTIME_ARCHIVE" '런타임 ' '--runtime-archive로 미리 받은 파일을 지정하십시오.'
+        fetch "$RUNTIME_URL" "$RUNTIME_ARCHIVE" "$RUNTIME_SHA256" '런타임 ' '--runtime-archive로 미리 받은 파일을 지정하십시오.'
     fi
 fi
 [ -f "$RUNTIME_ARCHIVE" ] || die "런타임 파일이 없습니다: $RUNTIME_ARCHIVE"
@@ -313,9 +327,6 @@ verify_licenses() {  # verify_licenses <디렉터리> <full 배포판 SHA-256>
     return 0
 }
 
-LICENSE_WORK=$(mktemp -d "${TMPDIR:-/tmp}/aistor-lic.XXXXXX")
-WORK=$(mktemp -d "${TMPDIR:-/tmp}/aistor-build.XXXXXX")
-trap 'rm -rf -- "$WORK" "$LICENSE_WORK"' EXIT
 case ${LICENSE_SHA256_PINNED:-} in
     [0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;;
     *) [ -n "$LICENSE_DIR" ] && [ "$ALLOW_UNVERIFIED_LICENSES" -eq 1 ] ||
@@ -329,7 +340,9 @@ else
     if [ -z "$LICENSE_ARCHIVE" ]; then
         mkdir -p -- "$CACHE_DIR"
         LICENSE_ARCHIVE=$CACHE_DIR/$LICENSE_FILE
-        [ -f "$LICENSE_ARCHIVE" ] || fetch "$LICENSE_URL" "$LICENSE_ARCHIVE" '' '미리 받은 파일을 옵션으로 지정하십시오.'
+        if [ ! -f "$LICENSE_ARCHIVE" ]; then
+            fetch "$LICENSE_URL" "$LICENSE_ARCHIVE" "$LICENSE_SHA256_PINNED" '' '미리 받은 파일을 옵션으로 지정하십시오.'
+        fi
     fi
     [ -f "$LICENSE_ARCHIVE" ] || die "라이선스 원문 출처 파일이 없습니다: $LICENSE_ARCHIVE"
     actual=$(sha256sum -- "$LICENSE_ARCHIVE" | cut -d' ' -f1)
@@ -417,7 +430,7 @@ MIN_GLIBC=$MIN_GLIBC
 PYTHON_VERSION=$PBS_PYTHON
 RUNTIME_SOURCE=python-build-standalone $PBS_RELEASE ($PBS_TRIPLE, install_only_stripped)
 RUNTIME_ARCHIVE_SHA256=$RUNTIME_SHA256
-SYSTEM_PYTHON_MIN=3.9
+SYSTEM_PYTHON_MIN=$SYSTEM_PYTHON_MIN
 R1_TOOL_VERSION=$R1_VERSION
 R2_TOOL_VERSION=$R2_VERSION
 SOURCE_COMMIT=$SOURCE_COMMIT
@@ -488,7 +501,7 @@ Python 런타임이 동봉되어 있습니다. 인터넷·SUBNET·MinIO 서버�
 
   주요 옵션: --mask strict|basic(기본 strict), --fail-on-priority P1~P4, --as-of <시간대 포함 시각>,
   --lang ko, --out-dir <디렉터리>(기본 ~/aistor-diag-output), --force(기존 결과 보존, 새 세대 추가),
-  --use-system-python(검증된 python3 3.9 이상). 전체: ./run-report.sh --help
+  --use-system-python(검증된 python3 $SYSTEM_PYTHON_MIN 이상). 전체: ./run-report.sh --help
   - 두 입력의 수집 시각 차가 120초를 넘거나 서버 대상이 다르면 결합을 거부합니다(종료 코드 2).
     로컬에서 다시 만든 Markdown은 Date가 생성 시각이라 거부될 수 있으니 같은 수집 파일을 쓰십시오.
   - 입력을 읽을 권한이 없으면 소유자 계정으로 실행하거나 읽을 수 있는 사본을 지정하십시오(원본 권한 변경 금지).

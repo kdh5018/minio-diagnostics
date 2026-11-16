@@ -20,6 +20,7 @@ readonly EXIT_USAGE=2
 readonly EXIT_OUTPUT=3
 readonly EXIT_ENV=5
 # 소스(저장소) 실행 및 --use-system-python 에서 허용하는 시스템 python3 최소 버전.
+# 이 줄이 유일한 원본이다. build-release.sh가 읽어 RELEASE-INFO·README-ko에 넣는다(형식 유지).
 readonly DEFAULT_SYSTEM_PYTHON_MIN=3.9
 
 say() { printf '%s\n' "$*"; }

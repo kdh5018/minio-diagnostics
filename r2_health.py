@@ -280,7 +280,7 @@ def report(body, documents=1, official_text=None, as_of=None, mask='strict'):
     if pairing['status'] == 'conflict':
         raise LinkConflict(dict(pairing.pop('conflict_detail'), delta=pairing['time_delta_seconds']))
     if official_text is not None:
-        r = a.model(official_text, mask)
+        r = a.model(official_text, mask, as_of)  # 0.4.3: 공식 부분도 같은 기준 시각(R1과 동일)
     else:
         r = {'schema_version': '1.1-r1', 'official_summary': None, 'findings': [], 'check_results': [],
              'parser_errors': [], 'policy': {'version': 'r2-initial-1', 'profile': 'unspecified'},
@@ -461,9 +461,11 @@ def main(argv=None):
         print('R2 부분 분석: --allow-partial 없이 결과를 확정하지 않습니다.', file=sys.stderr)
         return 4
     try:
-        for source in (args.health, args.official_report):
-            if source and (source.resolve() == args.out_dir.resolve() or source.resolve() == (args.out_dir / 'CURRENT.json').resolve()):
-                raise a.OutputError('input/output collision')
+        a.refuse_input_output_alias(args.out_dir, args.health, args.official_report)
+    except (a.OutputError, OSError):
+        print(a.OUTPUT_FAILURE_MESSAGE, file=sys.stderr)
+        return 3
+    try:
         generation = a.save(r, args.out_dir, args.force, renderers={
             'markdown': markdown_report, 'html': html_report})
         print('R2 결과 세트 확정: ' + str(generation.resolve()))

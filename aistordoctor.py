@@ -2,6 +2,7 @@
 R2 health and R3/R4 analysis are deliberately not implemented in R1.
 """
 import argparse
+import bisect
 from collections import Counter
 import datetime as dt
 import errno
@@ -37,6 +38,23 @@ class InputError(ValueError):
 
 class OutputError(ValueError):
     pass
+
+
+OUTPUT_FAILURE_MESSAGE = '출력 실패: 경로·충돌·접근권한을 확인하십시오. 기존 확정 결과를 보존합니다.'
+
+
+def refuse_input_output_alias(out_dir, *sources):
+    """R1·R2 공용: 입력이 출력 폴더 자체이거나 그 CURRENT.json(경로·하드링크 포함)이면 거부한다."""
+    pointer = out_dir / 'CURRENT.json'
+    for source in sources:
+        if source and (out_dir.resolve() == source.resolve() or pointer.resolve() == source.resolve() or
+                       (pointer.exists() and os.path.samefile(pointer, source))):
+            raise OutputError('input/output collision')
+
+
+def check_deadline(deadline):
+    if time.monotonic() > deadline:
+        raise InputError('processing time limit exceeded')
 
 
 # 입력 오류 안내. 키는 이 도구가 만든 고정 문구이며, 입력 내용·경로·원본 오류 본문은 출력하지 않는다.
@@ -522,8 +540,7 @@ def parse_report(text):
         raise InputError('input limit exceeded')
     visible, fenced = [], False
     for n, line in enumerate(raw_lines, 1):
-        if time.monotonic() > deadline:
-            raise InputError('processing time limit exceeded')
+        check_deadline(deadline)
         opener = re.match(r'^\s*(`{3,}|~{3,})', line)
         if opener:
             if not fenced:
@@ -541,6 +558,7 @@ def parse_report(text):
     details, current = [], None
     section = ''
     for n, line in visible:
+        check_deadline(deadline)
         if re.match(r'^##\s+', line):
             section = line[3:].strip().lower()
             headers = None
@@ -578,16 +596,20 @@ def parse_report(text):
         raise InputError('check limit exceeded')
     if (summary['errors'] or summary['warnings']) and not rows:
         raise InputError('required check table missing')
+    # 상세는 다음 상세 또는 다음 ## 구간 앞에서 끝난다. 구간 줄 목록은 한 번만 만든다(상세마다 전체를 다시 훑지 않음).
+    section_lines = [n for n, line in visible if re.match(r'^##\s+', line)]
     for i, detail in enumerate(details):
+        check_deadline(deadline)
         end = details[i + 1]['line'] - 1 if i + 1 < len(details) else len(raw_lines)
-        later_sections = [n - 1 for n, line in visible if n > detail['line'] and re.match(r'^##\s+', line)]
-        if later_sections:
-            end = min(end, later_sections[0])
+        later = bisect.bisect_right(section_lines, detail['line'])
+        if later < len(section_lines):
+            end = min(end, section_lines[later] - 1)
         detail['lines'] = raw_lines[detail['line']:end]
     if len(details) > MAX_CHECKS:
         raise InputError('detail limit exceeded')
     used = set()
     for n, row in rows:
+        check_deadline(deadline)
         matches = [i for i, d in enumerate(details) if d['index'] == row.get('Index') and d['name'] == row.get('Name')]
         detail = details[matches[0]] if len(matches) == 1 else None
         if detail:
@@ -601,6 +623,7 @@ def parse_report(text):
                        'evidence_blocks': evidence_blocks(detail['lines'], detail['line'] + 1) if detail else [],
                        'source_locator': {'input': 'input-001', 'line': n}})
     for i, detail in enumerate(details):
+        check_deadline(deadline)
         if i not in used:
             notes.append('unmatched detail preserved')
             checks.append({'source_check_id': None, 'official_status': detail['status'], 'title': detail['name'],
@@ -618,8 +641,7 @@ def parse_report(text):
         notes.append('unrecognized official status')
     if sum(len(c['evidence_blocks']) for c in checks) > MAX_BLOCKS:
         raise InputError('block limit exceeded')
-    if time.monotonic() > deadline:
-        raise InputError('processing time limit exceeded')
+    check_deadline(deadline)
     return summary, collected, checks, sorted(set(notes))
 
 
@@ -1043,14 +1065,12 @@ def main(argv=None, *, default_out_dir=None):
         return 4
     if args.out_dir:
         try:
-            # Output sets cannot alias or reside within the source file.
-            if args.out_dir.resolve() == args.official_report.resolve() or (args.out_dir / 'CURRENT.json').resolve() == args.official_report.resolve() or ((args.out_dir / 'CURRENT.json').exists() and os.path.samefile(args.out_dir / 'CURRENT.json', args.official_report)):
-                raise OutputError('input/output collision')
+            refuse_input_output_alias(args.out_dir, args.official_report)
             generation = save(report, args.out_dir, args.force)
             print('결과 세트 확정: ' + str(generation.resolve()))
             print(result_summary_line(report))
         except (OutputError, OSError):
-            print('출력 실패: 경로·충돌·접근권한을 확인하십시오. 기존 확정 결과를 보존합니다.', file=sys.stderr)
+            print(OUTPUT_FAILURE_MESSAGE, file=sys.stderr)
             return 3
     else:
         print(json.dumps({'official_summary': report['official_summary'], 'run_status': report['run_status'], 'coverage': report['coverage']}, ensure_ascii=False))

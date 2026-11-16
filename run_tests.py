@@ -692,5 +692,37 @@ class Fix041Tests(unittest.TestCase):
                 self.assertNotIn('primary-object-store-pool', body)
 
 
+class Fix043Tests(unittest.TestCase):
+    """0.4.3: 0.4.2 간소화 중 발견한 남은 항목."""
+
+    def test_parse_deadline_checked_inside_loops(self):
+        # 시한을 넘긴 뒤에는 다음 반복에서 바로 멈춰야 한다(근거 블록 파싱 등 이후 작업을 하지 않음).
+        clock = [0.0]
+        real_cells, blocks = a.cells, []
+
+        def late_cells(line):
+            clock[0] = a.MAX_PROCESS_SECONDS + 1.0
+            return real_cells(line)
+
+        def counting_blocks(*args, **kwargs):
+            blocks.append(1)
+            return []
+
+        with patch.object(a.time, 'monotonic', lambda: clock[0]), patch.object(a, 'cells', late_cells), \
+                patch.object(a, 'evidence_blocks', counting_blocks):
+            with self.assertRaises(a.InputError) as caught:
+                a.parse_report(SYNTHETIC)
+        self.assertIn('processing time limit exceeded', str(caught.exception))
+        self.assertEqual(blocks, [])
+        self.assertEqual(a.MAX_PROCESS_SECONDS, 10)
+
+    def test_parse_result_unchanged_for_many_sections(self):
+        # 구간 끝 계산을 바꿔도 결과가 같아야 한다: 상세 뒤에 다른 ## 구간이 오면 그 앞에서 끊는다.
+        text = SYNTHETIC + '\n## Appendix\nnot part of the detail\n'
+        summary, collected, checks, notes = a.parse_report(text)
+        self.assertNotIn('not part of the detail', checks[0]['detail'])
+        self.assertEqual(a.parse_report(SYNTHETIC)[2][0]['detail'], checks[0]['detail'].rstrip('\n'))
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
