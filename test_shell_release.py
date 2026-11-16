@@ -525,6 +525,44 @@ class ShellEntrypointTests(unittest.TestCase):
         self.assertIn('소스 실행', p.stdout)
 
 
+    # -- 0.4.1 고객 관점 회귀 테스트 --------------------------------------------
+    def test_relative_out_dir_with_dotdot_shown_as_clean_absolute_path(self):
+        bundle = self.make_bundle()
+        work = self.base / '작업 위치'
+        work.mkdir()
+        self.write_input('작업 위치/보고서.md')
+        p = self.run_sh(bundle, '--official-report', '보고서.md', '--out-dir', '../작업 위치/../정리된 출력', cwd=work)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        expected = str((self.base / '정리된 출력').resolve())
+        generation = self.generation_of(self.base / '정리된 출력')
+        self.assertIn('출력: ' + expected + ' (새로 생성 예정', p.stdout)
+        self.assertIn('결과 폴더: ' + str(generation.resolve()), p.stdout)
+        self.assertNotIn('/../', p.stdout)
+        self.assertNotIn('/./', p.stdout)
+        self.assertIn('scp -r', p.stdout)
+        self.assertFalse((generation.parent / '.output.lock').exists())
+
+    def test_nameless_owner_shown_in_korean(self):
+        bundle = self.make_bundle()
+        shim = self.base / 'stat-shim'
+        shim.mkdir()
+        real_stat = shutil.which('stat')
+        (shim / 'stat').write_text('#!/bin/sh\nif [ "$2" = "%%U %%u %%a" ]; then echo "UNKNOWN 4242 700"; exit 0; fi\nexec %s "$@"\n'
+                                   % shlex.quote(real_stat), encoding='utf-8')
+        os.chmod(shim / 'stat', 0o755)
+        blocked = self.base / '막힌 폴더'
+        blocked.mkdir()
+        os.chmod(blocked, 0o000)
+        self.addCleanup(os.chmod, blocked, 0o700)
+        if os.access(blocked, os.X_OK):
+            self.skipTest('running with privileges that bypass directory permissions')
+        p = self.run_sh(bundle, '--official-report', str(blocked / 'r.md'),
+                        env={'PATH': str(shim) + ':' + os.environ.get('PATH', '/usr/bin:/bin')})
+        self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+        self.assertIn('소유자 이름 없는 계정(UID 4242), 권한 700', p.stderr)
+        self.assertNotIn('UNKNOWN', p.stderr)
+
+
 @unittest.skipUnless(LINUX and all(shutil.which(t) for t in ('tar', 'gzip', 'sha256sum', 'find', 'grep', 'xargs', 'install')),
                      'build-release.sh tests need Linux bash, tar, gzip, sha256sum, findutils, grep, install')
 class ReleasePackagingTests(unittest.TestCase):

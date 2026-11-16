@@ -239,7 +239,8 @@ class R2Tests(unittest.TestCase):
         r = h.report(body)
         rendered = h.html_report(r)
         self.assertIn('<option>용량</option>', rendered)
-        self.assertIn('<option>해당 없음 / 자체 결과: fail</option>', rendered)
+        # 0.4.1 의도된 변경: 필터 값은 그대로, 보이는 글자는 한국어(fail → 실패).
+        self.assertIn('<option value="해당 없음 / 자체 결과: fail">해당 없음 / 자체 결과: 실패</option>', rendered)
         self.assertTrue(all(c['official_status'] is None for c in r['check_results']))
         self.assertIn('raw source counters', r['facts']['health']['capacity_unit'])
 
@@ -485,6 +486,48 @@ class R2Tests(unittest.TestCase):
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 self.assertFalse(any(n.name.split('.')[0] in {'socket', 'urllib', 'http', 'requests', 'subprocess'} for n in node.names))
+
+
+    # -- 0.4.1 고객 관점 회귀 테스트 --------------------------------------------
+    def test_unevaluated_rule_shows_korean_not_none(self):
+        body = copy.deepcopy(SYNTHETIC)
+        body['sys']['config'][0]['config']['proc-cmdline'] = []
+        r = h.report(body, 1, PAIRED_MD)
+        iommu = next(f for f in r['findings'] if f['id'] == 'r2.iommu.consistency')
+        self.assertIsNone(iommu['rule_result'])
+        md, rendered = h.markdown_report(r), h.html_report(r)
+        for text in (md, rendered, iommu['observed']):
+            self.assertNotIn('None', text)
+            self.assertIn('자체 점검 결과: 미평가 / 명시적 IOMMU 옵션이 관측되지 않았거나 모호함', text)
+        self.assertIn('공식 상태: 해당 없음 / 자체 결과: 미평가', md)
+
+    def test_r2_markdown_has_no_entities_and_filters_keep_values(self):
+        body = copy.deepcopy(SYNTHETIC)
+        body['minio']['info']['servers'][0]['drives'][0]['usedspace'] = 101
+        r = h.report(body, 1, PAIRED_MD)
+        md, rendered = h.markdown_report(r), h.html_report(r)
+        for entity in ('&lt;', '&gt;', '&quot;', '&#'):
+            self.assertNotIn(entity, md)
+        self.assertIn('<option value="해당 없음 / 자체 결과: fail">해당 없음 / 자체 결과: 실패</option>', rendered)
+        self.assertIn('data-status="해당 없음 / 자체 결과: fail"', rendered)
+        self.assertIn('자체 점검 결과: 실패 / 제공된 용량 카운터 범위만 확인 (provided_counter_bounds_only)', md)
+        self.assertNotIn('secret.internal', md + rendered)
+
+    def test_real_combined_readable_when_fixture_present(self):
+        if not (REAL.is_file() and MD.is_file()):
+            self.skipTest('approved actual fixtures unavailable; not a pass')
+        body, count = h.read(REAL)
+        r = h.report(body, count, MD.read_text(encoding='utf-8'))
+        self.assertEqual(r['official_summary'], {'passed': 31, 'errors': 2, 'warnings': 2})
+        self.assertEqual(r['analysis_summary']['custom_rule_counts'], {'pass': 4, 'warning': 2, 'not_evaluated': 1})
+        self.assertEqual(r['facts']['health']['collection']['reported_error_count'], 6)
+        md, rendered = h.markdown_report(r), h.html_report(r)
+        for entity in ('&lt;', '&gt;', '&quot;', '&#'):
+            self.assertNotIn(entity, md)
+        for text in (md, rendered):
+            self.assertNotIn('결과: None', text)
+            self.assertIn('/proc/cmdline', text)
+            self.assertNotIn('svc.cluster.local', text)
 
 
 if __name__ == '__main__':

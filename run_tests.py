@@ -11,6 +11,7 @@ from io import StringIO
 import json
 import multiprocessing
 import os
+import re
 from pathlib import Path
 import tempfile
 import unittest
@@ -481,6 +482,214 @@ class SyntheticWriterUnitTests(unittest.TestCase):
         new = a.save(self.report, self.root, force=True)
         self.assertNotEqual(old, new)
         self.assertTrue((old / 'manifest.json').is_file())
+
+
+TLS_MD = SYNTHETIC.replace('unknown.check', 'minio.net.tls.valid').replace(
+    'host=test.svc.cluster.local:9000 password=canary-secret',
+    'Certificate valid from 2026-01-01T00:00:00Z until 2026-10-21T01:56:42Z')
+
+
+def unescaped_html_risks(md):
+    """Independent check: outside code spans/fences, nothing may start HTML, an entity or a link."""
+    risks, fence = [], None
+    for line in md.split('\n'):
+        opener = re.match(r'^(`{3,})', line)
+        if fence:
+            if line.strip() == fence:
+                fence = None
+            continue
+        if opener:
+            fence = opener[1]
+            continue
+        plain = re.sub(r'(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)', '', line)
+        risks += re.findall(r'(?<!\\)<[A-Za-z/!?][^\n]{0,20}', plain)
+        risks += re.findall(r'(?<!\\)&(?:#\w+|[A-Za-z]\w*);', plain)
+        risks += re.findall(r'(?<!\\)\]\(', plain)
+    return risks
+
+
+class Fix041Tests(unittest.TestCase):
+    private_root = R1Tests.private_root
+    protected_root = R1Tests.protected_root
+    """0.4.1 customer-view regressions (TEST_LOG 8절)."""
+
+    ENTITIES = ('&lt;', '&gt;', '&amp;', '&quot;', '&#')
+
+    def test_markdown_has_no_html_entities(self):
+        text = SYNTHETIC.replace('Observed fact', 'Cluster has < recommended (4) servers').replace(
+            'host=test.svc.cluster.local:9000 password=canary-secret',
+            'max_ptes_none [8 nodes per server pool] "quoted" it\'s `cat /proc/cmdline` a|b * c')
+        md = a.markdown(a.model(text))
+        for entity in self.ENTITIES:
+            self.assertNotIn(entity, md)
+        self.assertIn('max_ptes_none [8 nodes per server pool] "quoted" it\'s `cat /proc/cmdline`', md)
+        self.assertIn('Cluster has < recommended (4) servers', md)
+
+    def test_markdown_hostile_input_stays_inert(self):
+        attacks = ['<script>alert(1)</script>', '<img src=x onerror=alert(1)>', '[open](javascript:alert(1))',
+                   '![load](data:text/html,x)', '&lt;b&gt; &#60;script&#62;', '<!-- hidden -->', '[ref]: javascript:alert(1)',
+                   '`unclosed <script>', '``a ` b`` <iframe src=x>', '<http://evil.example/>', 'a\\<b> \\[x](y)']
+        for attack in attacks:
+            with self.subTest(attack=attack):
+                report = a.model(SYNTHETIC.replace('Observed fact', attack).replace('host=test.svc', attack + ' host=test.svc'))
+                md = a.markdown(report)
+                self.assertEqual(unescaped_html_risks(md), [])
+                rendered = a.html_report(report)
+                for tag in ('<script>alert', '<img ', '<iframe ', '<!-- hidden'):
+                    self.assertNotIn(tag, rendered)
+
+    def test_markdown_code_blocks_are_fenced_and_unbreakable(self):
+        text = SYNTHETIC.replace('# this is text, never executed', '```` <script>x</script>')
+        md = a.markdown(a.model(text))
+        self.assertIn('`````\n```` <script>x</script>', md)
+        self.assertEqual(unescaped_html_risks(md), [])
+
+    def test_md_line_rules(self):
+        self.assertEqual(a.md_text('max_ptes_none'), 'max_ptes_none')
+        self.assertEqual(a.md_text('_x_ *y*'), '\\_x\\_ \\*y\\*')
+        self.assertEqual(a.md_text('# heading'), '\\# heading')
+        self.assertEqual(a.md_text('1. item'), '1\\. item')
+        self.assertEqual(a.md_text('a|b', cell=True), 'a\\|b')
+        self.assertEqual(a.md_text('`a|b`', cell=True), '`a\\|b`')
+        self.assertEqual(a.md_text('x\ny', cell=True), 'x y')
+        self.assertEqual(a.md_text('[a](b)'), '[a\\](b)')
+        self.assertEqual(a.md_text('C:\\dir\\file'), 'C:\\dir\\file')
+
+    def test_public_reference_paths_and_urls_readable_in_both_levels(self):
+        public = ['/proc/cmdline', '/etc/default/grub', '/etc/kernel/cmdline',
+                  '/sys/kernel/mm/transparent_hugepage/enabled', '/sys/kernel/mm/transparent_hugepage/defrag',
+                  '/sys/kernel/mm/transparent_hugepage/khugepaged/max_ptes_none',
+                  'https://docs.min.io/enterprise/aistor-object-store/reference/aistor-server/requirements/',
+                  'https://www.kernel.org/doc/html/latest/admin-guide/kernel-parameters.html?highlight=iommu',
+                  'https://tip.golang.org/doc/gc-guide#Linux_transparent_huge_pages']
+        for level in ('strict', 'basic'):
+            m = a.Masker(level)
+            for value in public:
+                with self.subTest(level=level, value=value):
+                    self.assertEqual(m.string('see `cat %s`.' % value), 'see `cat %s`.' % value)
+
+    def test_identifiers_still_masked_in_both_levels(self):
+        private = ['pool1.server1:9000', 'minio-1:9000', '10.20.30.40', '10.20.30.40:9000', 'node1.example.com',
+                   'store-0.store-hl.ns.svc.cluster.local:9000', '/dev/disk/by-id/nvme-SAMSUNG_SERIAL123',
+                   '/sys/class/net/eth0/address', '/sys/block/nvme0n1/device/serial', '/home/customer/data',
+                   'https://subnet.min.io/cluster/abc', 'https://docs.min.io/x?host=10.1.2.3',
+                   'https://docs.min.io/x/customer.internal/y', 'https://user@docs.min.io/x', 'fe80::1']
+        for level in ('strict', 'basic'):
+            m = a.Masker(level)
+            for value in private:
+                with self.subTest(level=level, value=value):
+                    out = m.string('value %s end' % value)
+                    self.assertNotIn(value, out)
+                    self.assertIn('identifier-', out)
+
+    def test_r3_style_server_names_masked_everywhere(self):
+        text = SYNTHETIC.replace('host=test.svc.cluster.local:9000 password=canary-secret',
+                                 '| Server | Value |\n|---|---|\n| pool1.server1:9000 | x |\n| pool1.server2:9000 | y |')
+        for level in ('strict', 'basic'):
+            report = a.model(text, level)
+            for body in (json.dumps(report), a.markdown(report), a.html_report(report)):
+                self.assertNotIn('pool1.server', body)
+
+    def test_codes_have_korean_labels(self):
+        report = a.model(SYNTHETIC)
+        md, rendered = a.markdown(report), a.html_report(report)
+        self.assertIn('우선순위: 미분류 (unclassified)', md)
+        self.assertIn('평가 범위: 해설 미등록 (unsupported) / 이 도구에 등록된 해설 없음 (no_registered_explanation)', md)
+        self.assertIn('공식 상태: 오류 (error)', md)
+        self.assertIn('근거 구간: 정보(Info) (info)', md)
+        self.assertIn('환경: 미지정 (unspecified)', md)
+        self.assertNotRegex(md, r'우선순위: unclassified|평가 범위: unsupported')
+        self.assertIn('<option value="unclassified">미분류 (unclassified)</option>', rendered)
+        self.assertIn('data-priority="unclassified"', rendered)
+        self.assertIn('<option value="error">오류 (error)</option>', rendered)
+        known = a.model(SYNTHETIC.replace('unknown.check', 'sys.mem.iommu'))
+        self.assertIn('평가 가능 (assessable) / 공식 보고서 결과만 반영(자체 재판정 없음) (official_import_only)', a.markdown(known))
+
+    def test_certificate_time_shows_collection_and_render_basis(self):
+        report = a.model(TLS_MD)
+        self.assertEqual(report['facts']['certificate_remaining_seconds'], 752393)
+        with patch.object(a, 'now_utc', return_value=a.dt.datetime(2026, 11, 16, 0, 0, tzinfo=a.dt.timezone.utc)):
+            md, rendered = a.markdown(report), a.html_report(report)
+        for body in (md, rendered):
+            self.assertIn('인증서 남은 시간(수집 시각 기준)', body)
+            self.assertIn('752393초', body)
+            self.assertIn('인증서 남은 시간(보고서 생성 시각 기준)', body)
+            self.assertIn('이미 만료됨', body)
+            self.assertIn('2026-11-16 09:00:00', body)
+        with patch.object(a, 'now_utc', return_value=a.dt.datetime(2026, 10, 20, 1, 56, 42, tzinfo=a.dt.timezone.utc)):
+            md = a.markdown(report)
+        self.assertIn('86400초 (약 1.0일) (생성 시각: 한국 시각 2026-10-20 10:56:42)', md)
+        explicit = a.model(TLS_MD, as_of='2026-10-20T01:56:42Z')
+        self.assertIn('인증서 남은 시간(--as-of 지정 시각 기준)', a.markdown(explicit))
+
+    def test_no_lock_file_left_and_directory_lock_conflicts(self):
+        import fcntl
+        root = self.protected_root()
+        a.save(a.model(SYNTHETIC), root)
+        self.assertFalse((root / a.LEGACY_LOCK).exists())
+        fd = os.open(root, os.O_RDONLY)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with self.assertRaises(a.OutputError):
+                a.save(a.model(SYNTHETIC), root, force=True)
+        finally:
+            os.close(fd)
+        a.save(a.model(SYNTHETIC), root, force=True)
+        self.assertFalse((root / a.LEGACY_LOCK).exists())
+
+    def test_lock_file_fallback_when_directory_lock_unsupported(self):
+        import errno
+        import fcntl
+        import stat as st
+        root = self.protected_root()
+        original = fcntl.flock
+        def flock(fd, op):
+            if st.S_ISDIR(os.fstat(fd).st_mode):
+                raise OSError(errno.ENOLCK, 'synthetic: no directory locks')
+            return original(fd, op)
+        with patch.object(fcntl, 'flock', side_effect=flock):
+            a.save(a.model(SYNTHETIC), root)
+        lock = root / a.LEGACY_LOCK
+        self.assertTrue(lock.is_file())
+        self.assertEqual(st.S_IMODE(lock.stat().st_mode), 0o600)
+
+    def test_printed_result_path_is_absolute_and_normalized(self):
+        root = self.private_root()
+        (root / 'work').mkdir(mode=0o700)
+        source = root / 'report.md'
+        source.write_text(SYNTHETIC, encoding='utf-8')
+        cwd = os.getcwd()
+        out = StringIO()
+        try:
+            os.chdir(root / 'work')
+            with contextlib.redirect_stdout(out):
+                rc = a.main(['--official-report', '../report.md', '--out-dir', '../work/../result'])
+        finally:
+            os.chdir(cwd)
+        self.assertEqual(rc, 0)
+        line = next(x for x in out.getvalue().splitlines() if x.startswith('결과 세트 확정: '))
+        printed = line.split(': ', 1)[1]
+        self.assertTrue(os.path.isabs(printed))
+        self.assertNotIn('..', printed)
+        self.assertTrue(printed.startswith(str((root / 'result').resolve()) + '/run-'))
+
+    def test_real_fixture_markdown_readable_and_masked(self):
+        if not SAMPLE.is_file():
+            self.skipTest('approved real fixture not available; not a pass')
+        text = SAMPLE.read_text(encoding='utf-8')
+        for level in ('strict', 'basic'):
+            report = a.model(text, level)
+            self.assertEqual(report['official_summary'], {'passed': 31, 'errors': 2, 'warnings': 2})
+            md = a.markdown(report)
+            for entity in self.ENTITIES:
+                self.assertNotIn(entity, md)
+            self.assertEqual(unescaped_html_risks(md), [])
+            for public in ('/proc/cmdline', '/etc/default/grub', '/sys/kernel/mm/transparent_hugepage/khugepaged/max_ptes_none',
+                           'https://docs.min.io/enterprise/aistor-object-store/reference/aistor-server/requirements/'):
+                self.assertIn(public, md)
+            for body in (md, a.html_report(report), json.dumps(report)):
+                self.assertNotIn('svc.cluster.local', body)
+                self.assertNotIn('primary-object-store-pool', body)
 
 
 if __name__ == '__main__':
