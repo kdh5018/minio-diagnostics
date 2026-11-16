@@ -15,7 +15,7 @@ import zlib
 import aistordoctor as a
 import r2_enrichment as enrichment
 
-VERSION = '0.4.0-r2'
+VERSION = '0.4.1-r2'
 SCHEMA_VERSION = '1.3-r2'
 MAX_COMPRESSED = 32 * 1024 * 1024
 MAX_EXPANDED = 64 * 1024 * 1024
@@ -320,7 +320,7 @@ def report(body, documents=1, official_text=None, as_of=None, mask='strict'):
         if c['rule_result'] == 'pass':
             continue
         r['findings'].append(dict(c, assessment_reason=c['reason'], priority='P2' if c['rule_result'] else 'unclassified',
-            observed='자체 점검 결과: ' + str(c['rule_result']) + ' / ' + c['reason'], detail=c['condition'],
+            observed='자체 점검 결과: ' + a.result_text(c['rule_result']) + ' / ' + a.label(c['reason']), detail=c['condition'],
             evidence_blocks=[], recommendation='원본 관측과 실제 대상을 읽기 전용으로 대조하십시오. 자동 조치는 수행하지 않습니다.',
             impact='현재 서비스 상태·데이터 안전성·원인을 확정하지 않습니다.', approval_required=True if c['rule_result'] else None,
             verification_steps=['필요한 입력과 의미를 확인한 뒤 동일 조건으로 재점검합니다.'], limitations=[c['condition']]))
@@ -413,9 +413,12 @@ def html_report(r):
     v = view(r)
     body = a.html_report(v)
     body = body.replace('<div class="filters">', observations_html(r) + '<div class="filters">', 1)
-    labels = sorted({f['official_status'] for f in v['findings'] if f['origin'] == 'custom_rule'})
-    options = ''.join('<option>' + a.html.escape(label) + '</option>' for label in labels)
-    body = body.replace('<option>passed</option>', '<option>passed</option>' + options)
+    # 필터 값(value)은 data-status와 같은 원래 문자열, 보이는 글자는 한국어로 둔다.
+    labels = sorted({(f['official_status'], a.status_text(f)) for f in v['findings'] if f['origin'] == 'custom_rule'})
+    options = ''.join('<option value="%s">%s</option>' % (a.html.escape(value, quote=True), a.html.escape(text))
+                      for value, text in labels)
+    passed = '<option value="passed">통과 (passed)</option>'
+    body = body.replace(passed, passed + options)
     body = body.replace('<option>미분류</option>', '<option>미분류</option><option>용량</option>')
     return body.replace('<label>공식 상태 ', '<label>공식/자체 결과 ')
 
@@ -473,7 +476,7 @@ def main(argv=None):
                 raise a.OutputError('input/output collision')
         generation = a.save(r, args.out_dir, args.force, renderers={
             'markdown': markdown_report, 'html': html_report})
-        print('R2 결과 세트 확정: ' + str(generation))
+        print('R2 결과 세트 확정: ' + str(generation.resolve()))
         print(a.result_summary_line(r))
     except (a.OutputError, OSError):
         print('R2 저장 실패: 기존 확정 세트를 보존합니다.', file=sys.stderr)

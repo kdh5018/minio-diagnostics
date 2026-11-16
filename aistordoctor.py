@@ -16,7 +16,7 @@ import sys
 import time
 import uuid
 
-VERSION = '0.4.0-r1'
+VERSION = '0.4.1-r1'
 SCHEMA_VERSION = '1.1-r1'
 PARSER_VERSION = 'official-markdown-r1-2'
 POLICY_VERSION = 'r1-1'
@@ -168,12 +168,85 @@ def duration_text(seconds):
     return '%s초 (약 %s%.1f일)' % (seconds, sign, abs(seconds) / 86400)
 
 
+# 0.4.1: 보고서에 보이는 영문 코드에 한국어 설명을 붙인다(JSON 값·HTML 필터 값은 그대로).
+LABEL_KO = {
+    'unclassified': '미분류', 'assessable': '평가 가능', 'unsupported': '해설 미등록', 'insufficient_data': '자료 부족',
+    'official_import_only': '공식 보고서 결과만 반영(자체 재판정 없음)', 'no_registered_explanation': '이 도구에 등록된 해설 없음',
+    'error': '오류', 'warning': '경고', 'passed': '통과', 'unspecified': '미지정',
+    'unlabelled': '구분 없음', 'info': '정보(Info)', 'resolution': '조치 안내(Resolution)',
+    'not_available_in_supported_markdown_contract': '공식 Markdown에 버전 정보가 없음',
+    'observed_server_metadata; no required product version': '서버 기록에서 관측한 값(특정 버전을 요구하지 않음)',
+    'not_identified; not_required_for_file_analysis': '확인 불가(파일 분석에는 필요 없음)',
+    'required_input_missing_or_unrecognized': '필요한 입력이 없거나 인식하지 못함',
+    'explicit_offline_record': '오프라인 기록이 명시됨', 'all_provided_states_ok': '제공된 상태가 모두 ok',
+    'provided_counter_bounds_only': '제공된 용량 카운터 범위만 확인', 'provided_version_string_comparison': '제공된 버전 문자열만 비교',
+    'collection_or_explicit_as_of_basis': '수집 시각 또는 --as-of 기준', 'isolated_rule_error': '이 규칙만 평가 중 오류(다른 규칙은 계속)',
+    'thp_config_missing': 'THP 설정 기록 없음', 'observed_value_differs_from_official_recommendation': '관측값이 공식 권장값과 다름',
+    'all_observed_values_match_official_recommendation': '관측값이 모두 공식 권장값과 같음',
+    'thp_values_missing_or_ambiguous': 'THP 값 일부가 없거나 모호함', 'explicit_flags_only': '명시된 옵션만 비교',
+    'explicit_flags_unobserved_or_ambiguous': '명시적 IOMMU 옵션이 관측되지 않았거나 모호함',
+    'recognized_error_fields_only': '인식된 오류 필드만 집계', 'lower_bound_error_rows_observed': '최소 오류 행 수만 확인',
+    'error_coverage_unavailable': '오류 집계 범위를 확인할 수 없음',
+}
+
+
+def label(code):
+    """Korean text for a report code, keeping the code in parentheses for traceability."""
+    if code is None:
+        return MISSING
+    text = LABEL_KO.get(str(code)) or CODE_KO.get(str(code)) or RESULT_KO.get(str(code))
+    return '%s (%s)' % (text, code) if text else str(code)
+
+
+def priority_text(priority):
+    return priority if priority in ('P1', 'P2', 'P3', 'P4') else label(priority)
+
+
+def result_text(result):
+    return RESULT_KO.get(str(result), str(result)) if result is not None else '미평가'
+
+
+def status_text(finding):
+    """Visible status. Custom rules have no official status; their own result is shown in Korean."""
+    if finding.get('origin') == 'custom_rule':
+        return '해당 없음 / 자체 결과: ' + result_text(finding.get('rule_result'))
+    return label(finding.get('official_status'))
+
+
+def assessment_text(finding):
+    return label(finding.get('assessment')) + ' / ' + label(finding.get('assessment_reason'))
+
+
+def now_utc():
+    # 보고서 생성 시각. 테스트에서 고정할 수 있도록 함수로 둔다.
+    return dt.datetime.now(dt.timezone.utc)
+
+
 RESULT_KO = {'pass': '통과', 'warning': '경고', 'fail': '실패', 'not_evaluated': '미평가', 'assessable': '평가 가능',
              'unsupported': '해설 미등록', 'insufficient_data': '자료 부족', 'unclassified': '미분류'}
 
 
+def render_time_remaining(expires_at):
+    """Remaining time measured at report generation, so an already expired certificate is not read as valid."""
+    if not expires_at:
+        return None
+    try:
+        expiry = dt.datetime.fromisoformat(str(expires_at).replace('Z', '+00:00'))
+    except ValueError:
+        return None
+    if expiry.tzinfo is None:
+        return None
+    now = now_utc()
+    seconds = int((expiry - now).total_seconds())
+    when = now.astimezone(KST).strftime('%Y-%m-%d %H:%M:%S')
+    if seconds <= 0:
+        return '이미 만료됨: 만료 후 %s 경과 (생성 시각: 한국 시각 %s)' % (duration_text(-seconds), when)
+    return '%s (생성 시각: 한국 시각 %s)' % (duration_text(seconds), when)
+
+
 def counts_rows(prefix, counts):
-    return [(prefix, RESULT_KO.get(str(k), str(k)), v) for k, v in sorted((counts or {}).items(), key=lambda kv: str(kv[0]))]
+    return [(prefix, priority_text(k) if prefix == '우선순위' else RESULT_KO.get(str(k), str(k)), v)
+            for k, v in sorted((counts or {}).items(), key=lambda kv: str(kv[0]))]
 
 
 def info_blocks(report):
@@ -191,8 +264,10 @@ def info_blocks(report):
         rows += [('원본 gzip 수집 시각', with_kst(health.get('collected_at'))),
                  ('원본 gzip JSON 문서 수', health.get('documents')),
                  ('원본 형식 버전(실행을 막지 않음)', health.get('format_version'))]
+    basis_name = '--as-of 지정 시각' if meta.get('as_of_origin') == 'explicit' else '수집 시각'
     rows += [('인증서 만료 시각', facts.get('certificate_expires_kst') or facts.get('certificate_expires_at')),
-             ('인증서 남은 시간(기준 시각부터)', duration_text(facts.get('certificate_remaining_seconds'))),
+             ('인증서 남은 시간(%s 기준)' % basis_name, duration_text(facts.get('certificate_remaining_seconds'))),
+             ('인증서 남은 시간(보고서 생성 시각 기준)', render_time_remaining(facts.get('certificate_expires_at'))),
              ('인증서 시각 미확정 사유', facts.get('certificate_time_reason'))]
     blocks.append(('table', ['항목', '값'], [r for r in rows if not (r[0] == '인증서 시각 미확정 사유' and r[1] is None)]))
     link = report.get('input_link')
@@ -208,9 +283,9 @@ def info_blocks(report):
     summary = report.get('analysis_summary') or {}
     blocks.append(('h', 2, '자체 해설 요약'))
     rows = []
-    for key, label in (('priority_counts', '우선순위'), ('category_counts', '영역'), ('assessment_counts', '평가 범위'),
+    for key, heading in (('priority_counts', '우선순위'), ('category_counts', '영역'), ('assessment_counts', '평가 범위'),
                        ('custom_rule_counts', '자체 점검 결과')):
-        rows += counts_rows(label, summary.get(key))
+        rows += counts_rows(heading, summary.get(key))
     blocks.append(('table', ['구분', '값', '개수'], rows) if rows else ('p', '집계할 항목이 없습니다.'))
     catalog = summary.get('custom_rule_catalog')
     if isinstance(catalog, dict) and catalog:
@@ -218,7 +293,7 @@ def info_blocks(report):
                        [(rid, c.get('version'), ', '.join(c.get('required_inputs') or []), c.get('condition')) for rid, c in catalog.items()]))
     blocks += [('h', 2, '입력 버전'),
                ('table', ['구성요소', '값', '사유'],
-                [(name, ', '.join(v['value']) if isinstance(v.get('value'), list) else v.get('value'), v.get('reason'))
+                [(name, ', '.join(v['value']) if isinstance(v.get('value'), list) else v.get('value'), label(v.get('reason')))
                  for name, v in (report.get('source_versions') or {}).items() if isinstance(v, dict)])]
     blocks.append(('h', 2, '한계'))
     blocks.append(('table', ['범위', '상태'], [(COVERAGE_LABELS.get(k, k), ko(v)) for k, v in (report.get('coverage') or {}).items()]))
@@ -257,22 +332,112 @@ def blocks_html(blocks):
     return ''.join(out)
 
 
-def md_literal(value):
-    # All user-origin text remains inert even in HTML-capable Markdown viewers.
-    return html.escape(str(value)).replace('`', '&#96;').replace('[', '&#91;').replace(']', '&#93;').replace('*', '&#42;').replace('_', '&#95;').replace('|', '&#124;').replace('!', '&#33;')
+MD_PUNCT = frozenset('!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~')
+MD_ENTITY = re.compile(r'&(?:#[0-9]{1,7}|#[xX][0-9a-fA-F]{1,6}|[A-Za-z][A-Za-z0-9]{1,31});')
+
+
+def md_line(line, cell=False, line_start=True):
+    """Escape one line by CommonMark/GFM rules: inert text without HTML entities.
+
+    Code spans (matched backtick runs) are kept verbatim because renderers never interpret
+    their content. Outside them only characters that could start HTML, entities, links,
+    emphasis or block structure are backslash-escaped, so plain readers (less, notepad)
+    still see the original text.
+    """
+    out, i, n = [], 0, len(line)
+    tildes = line.count('~') >= 2
+    if line_start:
+        line = line.lstrip(' \t')
+        n = len(line)
+        ordered = re.match(r'(\d{1,9})([.)])', line)
+        if ordered:
+            out.append(ordered[1] + '\\' + ordered[2])
+            i = ordered.end()
+        elif line[:1] in ('#', '>', '+', '-', '='):
+            out.append('\\' + line[0])
+            i = 1
+    while i < n:
+        ch = line[i]
+        if ch == '`':
+            j = i
+            while j < n and line[j] == '`':
+                j += 1
+            run, k, close = j - i, j, -1
+            while k < n:
+                if line[k] != '`':
+                    k += 1
+                    continue
+                m = k
+                while m < n and line[m] == '`':
+                    m += 1
+                if m - k == run:
+                    close = k
+                    break
+                k = m
+            if close >= 0:
+                span = line[i:close + run]
+                out.append(span.replace('|', '\\|') if cell else span)
+                i = close + run
+            else:
+                out.append('\\`' * run)
+                i = j
+            continue
+        nxt = line[i + 1] if i + 1 < n else ''
+        prev = line[i - 1] if i else ''
+        if ch == '\\':
+            out.append('\\\\' if not nxt or nxt in MD_PUNCT else '\\')
+        elif ch == '<':
+            out.append('\\<' if nxt and (nxt in '/!?' or (nxt.isascii() and nxt.isalpha())) else '<')
+        elif ch == '&':
+            out.append('\\&' if MD_ENTITY.match(line, i) else '&')
+        elif ch == ']':
+            out.append('\\]' if nxt and nxt in '([:' else ']')
+        elif ch == '[':
+            out.append('\\[' if nxt == '^' else '[')
+        elif ch == '*':
+            out.append('\\*')
+        elif ch == '_':
+            out.append('_' if prev.isalnum() and nxt.isalnum() else '\\_')
+        elif ch == '~' and tildes:
+            out.append('\\~')
+        elif ch == '|' and cell:
+            out.append('\\|')
+        else:
+            out.append(ch)
+        i += 1
+    return ''.join(out)
+
+
+def md_text(value, *, cell=False, line_start=True):
+    """Markdown-escape arbitrary text. Lines are escaped independently (code spans never cross lines)."""
+    lines = str(value).replace('\r\n', '\n').replace('\r', '\n').split('\n')
+    rendered = [md_line(line, cell, line_start or index > 0) for index, line in enumerate(lines)]
+    return ' '.join(rendered) if cell else '\n'.join(rendered)
+
+
+def md_inline(value):
+    """Escaped text that follows a label on the same line."""
+    return md_text(value, line_start=False)
+
+
+def md_code_block(text):
+    """Fenced block whose fence is longer than any backtick run inside, so content cannot close it."""
+    longest = max((len(run) for run in re.findall(r'`+', text)), default=0)
+    fence = '`' * max(3, longest + 1)
+    return fence + '\n' + text + '\n' + fence
 
 
 def blocks_markdown(blocks):
-    cell = lambda x: MISSING if x is None else md_literal(x).replace('\r', ' ').replace('\n', ' ')
+    cell = lambda x: MISSING if x is None else md_text(x, cell=True)
     out = []
     for block in blocks:
         kind = block[0]
         if kind == 'h':
-            out += ['#' * block[1] + ' ' + md_literal(block[2]), '']
+            out += ['#' * block[1] + ' ' + md_inline(block[2]), '']
         elif kind == 'p':
-            out += [md_literal(block[1]), '']
+            out += [md_text(block[1]).replace('\n', '\n\n'), '']
         elif kind == 'kv':
-            out += [md_literal(block[1]) + '**' + cell(block[2]) + '**', '']
+            out += [md_text(block[1]) + '**' + cell(block[2]) + '**', '']
         elif kind == 'ul':
             out += ['- ' + cell(x) for x in block[1]] + ['']
         elif kind == 'table':
@@ -281,7 +446,7 @@ def blocks_markdown(blocks):
             out += ['| ' + ' | '.join(cell(x) for x in row) + ' |' for row in block[2]]
             out.append('')
         elif kind == 'details':
-            out += ['#### ' + md_literal(block[1]), ''] + blocks_markdown(block[2]).split('\n')
+            out += ['#### ' + md_inline(block[1]), ''] + blocks_markdown(block[2]).split('\n')
     return '\n'.join(out)
 
 
@@ -460,7 +625,17 @@ class Masker:
     """Best-effort redaction, followed by leak checks. No mapping file is emitted."""
     secret = re.compile(r'''(?i)((?:secret[_ -]?key|access[_ -]?key|password|passwd|token|authorization)\s*[:=]\s*)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s|,;]+)''')
     private = re.compile(r'-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----', re.S)
-    identifiers = re.compile(r'https?://[^\s<>\]\)]+|\b(?:[\w-]+\.)+(?:local|internal|svc|lan|com|net|org)(?::\d+)?\b|\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\b|(?:[A-Za-z]:\\|/)(?:[\w.@-]+[/\\])+[\w.@-]+', re.I)
+    identifiers = re.compile(r'https?://[^\s<>\]\)]+|\b(?:[\w-]+\.)+(?:local|internal|svc|lan|com|net|org)(?::\d+)?\b|\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\b|(?<![\w.:/-])[A-Za-z][\w-]*(?:\.[\w-]+)*:\d{2,5}\b|(?:[A-Za-z]:\\|/)(?:[\w.@-]+[/\\])+[\w.@-]+', re.I)
+    # 0.4.1: 고객 조치 안내에 필요한 표준 커널·부팅 설정 경로와 공개 문서 URL만 원문으로 둔다.
+    # 호스트명·IP·장치 식별자가 들어갈 수 있는 경로(/dev, /sys/class/net, /sys/block 등)는 계속 가린다.
+    public_path = re.compile(r'/proc/(?:cmdline|meminfo|cpuinfo|sys/(?:kernel|vm|fs)(?:/[a-z0-9_]+)+)'
+                             r'|/sys/kernel/mm/transparent_hugepage(?:/[a-z_]+)*'
+                             r'|/etc/default/grub|/etc/kernel/cmdline|/etc/sysctl\.conf|/etc/security/limits\.conf'
+                             r'|/boot/grub2/grub\.cfg|/boot/grub2/grubenv')
+    public_url = re.compile(r'https://(?:docs\.min\.io|min\.io|www\.kernel\.org|kernel\.org|docs\.kernel\.org|tip\.golang\.org|go\.dev|golang\.org)'
+                            r'(?:/[A-Za-z0-9._~%+-]+)*/?(?:\?highlight=[A-Za-z0-9_+-]{1,40})?(?:#[A-Za-z0-9._-]{1,80})?')
+    trailing = '.,;:`\'"'
+
     ipv6 = re.compile(r'(?<![\w:])(?:[0-9a-f]{0,4}:){2,}[0-9a-f:]{1,4}(?:%[\w-]+)?(?![\w:])', re.I)
 
     def __init__(self, level, public_check_ids=()):
@@ -468,8 +643,20 @@ class Masker:
         self.aliases = {}
         self.public_check_ids = frozenset(public_check_ids)
 
+    def is_public(self, value):
+        core = value.rstrip(self.trailing)
+        if self.public_path.fullmatch(core):
+            return True
+        if self.public_url.fullmatch(core):
+            rest = core.split('/', 3)[3] if core.count('/') >= 3 else ''
+            # 경로·조각 안에 주소·도메인 형태가 끼어 있으면 공개 URL로 보지 않는다.
+            return not re.search(r'\d{1,3}(?:\.\d{1,3}){3}|(?:[\w-]+\.)+(?:local|internal|svc|lan|com|net|org)\b|@', rest, re.I)
+        return False
+
     def alias(self, match):
         value = match.group(0)
+        if self.is_public(value):
+            return value
         if value not in self.aliases:
             self.aliases[value] = 'identifier-%03d' % (len(self.aliases) + 1)
         return self.aliases[value]
@@ -598,32 +785,50 @@ def model(text, mask='strict', as_of=None):
     return report
 
 
+def evidence_markdown(block):
+    if block['type'] == 'code':
+        return [md_code_block(block.get('text', ''))]
+    if block['type'] == 'table':
+        if block['headers'] and all(len(row) == len(block['headers']) for row in block['rows']):
+            return (['| ' + ' | '.join(md_text(cell, cell=True) for cell in block['headers']) + ' |',
+                     '| ' + ' | '.join('---' for _ in block['headers']) + ' |'] +
+                    ['| ' + ' | '.join(md_text(cell, cell=True) for cell in row) + ' |' for row in block['rows']])
+        rows = ([block['headers']] if block['headers'] else []) + list(block['rows'])
+        return ['- ' + md_inline(' · '.join(str(cell) for cell in row)) for row in rows]
+    if block['type'] == 'list':
+        out = []
+        for line in str(block.get('text', '')).split('\n'):
+            item = re.match(r'^\s*(?:[-*+]|(\d{1,9})[.)])\s+(.*)$', line)
+            if item:
+                out.append((item[1] + '. ' if item[1] else '- ') + md_inline(item[2]))
+            elif line.strip():
+                out.append('  ' + md_inline(line.strip()))
+        return out
+    return [md_text(block.get('text', '')).replace('\n', '\n\n')]
+
+
 def markdown(report, extra_blocks=None):
-    literal = md_literal
     out = ['# MinIO AIStor 폐쇄망 진단 보고서', '',
-           '도구 버전: ' + report['tool_version'] + ' / 스키마: ' + report['schema_version'],
-           '해설 정책: ' + report['policy']['version'] + ' / 환경: ' + report['policy']['profile'], '',
-           '## 공식 요약', '', '공식 판정(mc 보고서): ' + literal(summary_text(report['official_summary'])), '',
-           '분석 상태: ' + report['run_status'] + ' — ' + STATUS_KO.get(report['run_status'], ''), '',
+           '도구 버전: ' + md_inline(report['tool_version']) + ' / 스키마: ' + md_inline(report['schema_version']),
+           '해설 정책: ' + md_inline(report['policy']['version']) + ' / 환경: ' + md_inline(label(report['policy']['profile'])), '',
+           '## 공식 요약', '', '공식 판정(mc 보고서): ' + md_inline(summary_text(report['official_summary'])), '',
+           '분석 상태: ' + md_inline(report['run_status']) + ' — ' + STATUS_KO.get(report['run_status'], ''), '',
            '공식 판정과 이 도구의 자체 점검은 별개입니다. 통과 상세 부재는 정상 검사 복원을 허용하지 않습니다.', '']
     for f in report['findings']:
-        out.extend(['## ' + literal(f['title']), '', '공식 상태: ' + literal(f['official_status']), '우선순위: ' + f['priority'],
-                    '평가 범위: ' + f['assessment'] + ' / ' + f['assessment_reason'], '',
-                    literal(f['observed']), '', literal(f['recommendation']), '', literal(f['impact']),
+        out.extend(['## ' + md_inline(f['title']), '',
+                    '공식 상태: ' + md_inline(status_text(f)) + '  ',
+                    '우선순위: ' + md_inline(priority_text(f['priority'])) + '  ',
+                    '평가 범위: ' + md_inline(assessment_text(f)), '',
+                    md_text(f['observed']), '', md_text(f['recommendation']), '', md_text(f['impact']), '',
                     '변경 승인: ' + {True: '필요', False: '불필요', None: '미정'}[f['approval_required']], '',
-                    '### 재확인 절차', '', *['- ' + literal(step) for step in f['verification_steps']], '',
+                    '### 재확인 절차', '', *['- ' + md_inline(step) for step in f['verification_steps']], '',
                     '### 원본 근거(마스킹)', ''])
         for block in f['evidence_blocks']:
-            out.append('근거 구간: ' + block['section'] + ' / 줄 ' + str(block['source_locator']['line']))
-            if block['type'] == 'table' and block['headers'] and all(len(row) == len(block['headers']) for row in block['rows']):
-                out.extend(['', '| ' + ' | '.join(literal(cell) for cell in block['headers']) + ' |',
-                            '| ' + ' | '.join('---' for _ in block['headers']) + ' |'])
-                out.extend('| ' + ' | '.join(literal(cell) for cell in row) + ' |' for row in block['rows'])
-            else:
-                out.extend(['', literal(block.get('text', block.get('rows', []))).replace('\n', '\n\n')])
+            out.append('근거 구간: ' + md_inline(label(block['section'])) + ' / 줄 ' + str(block['source_locator']['line']))
+            out.extend([''] + evidence_markdown(block))
             out.append('')
         if not f['evidence_blocks']:
-            out.extend([literal(f['detail']).replace('\n', '\n\n'), ''])
+            out.extend([md_text(f['detail']).replace('\n', '\n\n'), ''])
     out.append(blocks_markdown((extra_blocks or []) + info_blocks(report)))
     return '\n'.join(out)
 
@@ -634,7 +839,7 @@ def html_report(report, extra_html=''):
     for f in report['findings']:
         evidence = []
         for block in f['evidence_blocks']:
-            evidence.append('<p>근거 구간: %s / 줄 %s</p>' % (esc(block['section']), block['source_locator']['line']))
+            evidence.append('<p>근거 구간: %s / 줄 %s</p>' % (esc(label(block['section'])), block['source_locator']['line']))
             if block['type'] == 'table':
                 header = '<tr>' + ''.join('<th>%s</th>' % esc(cell) for cell in block['headers']) + '</tr>'
                 rows = ''.join('<tr>' + ''.join('<td>%s</td>' % esc(cell) for cell in row) + '</tr>' for row in block['rows'])
@@ -643,9 +848,9 @@ def html_report(report, extra_html=''):
                 evidence.append('<pre>%s</pre>' % esc(block['text']))
         steps = ''.join('<li>%s</li>' % esc(step) for step in f['verification_steps'])
         articles.append('<article data-status="%s" data-priority="%s" data-category="%s"><h2>%s</h2><p>공식: %s / 우선순위: %s / %s</p><p>%s</p><p>%s</p><p>%s</p><p>평가 범위: %s / 변경 승인: %s</p><ul>%s</ul><details><summary>마스킹된 근거</summary>%s</details></article>' %
-                        (*tuple(esc(x) for x in (f['official_status'], f['priority'], f['category'], f['title'], f['official_status'],
-                                               f['priority'], f['category'], f['observed'], f['recommendation'], f['impact'],
-                                               f['assessment'], {True: '필요', False: '불필요', None: '미정'}[f['approval_required']])),
+                        (*tuple(esc(x) for x in (f['official_status'], f['priority'], f['category'], f['title'], status_text(f),
+                                               priority_text(f['priority']), f['category'], f['observed'], f['recommendation'], f['impact'],
+                                               assessment_text(f), {True: '필요', False: '불필요', None: '미정'}[f['approval_required']])),
                          steps, ''.join(evidence) or '<pre>%s</pre>' % esc(f['detail'])))
     return '''<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
@@ -661,8 +866,8 @@ summary{cursor:pointer}summary:focus-visible,input:focus-visible,select:focus-vi
 </style><h1>MinIO AIStor 폐쇄망 진단 보고서</h1><p>도구·스키마·정책: %s</p><p>상태: %s</p><p>%s</p>
 <p>통과 상세는 복원하지 않습니다. 현재 서비스 상태의 실시간 검증이 아닙니다.</p>
 <div class="filters"><label>검색 <input id="q" type="search"></label>
-<label>공식 상태 <select id="s"><option value="">전체</option><option>error</option><option>warning</option><option>passed</option></select></label>
-<label>우선순위 <select id="p"><option value="">전체</option><option>P1</option><option>P2</option><option>P3</option><option>P4</option><option>unclassified</option></select></label>
+<label>공식 상태 <select id="s"><option value="">전체</option><option value="error">오류 (error)</option><option value="warning">경고 (warning)</option><option value="passed">통과 (passed)</option></select></label>
+<label>우선순위 <select id="p"><option value="">전체</option><option>P1</option><option>P2</option><option>P3</option><option>P4</option><option value="unclassified">미분류 (unclassified)</option></select></label>
 <label>영역 <select id="c"><option value="">전체</option><option>가용성</option><option>설정</option><option>보안</option><option>미분류</option></select></label></div>
 %s%s%s
 <script>'use strict';function filter(){const q=document.getElementById('q').value.toLowerCase(),s=document.getElementById('s').value,p=document.getElementById('p').value,c=document.getElementById('c').value;document.querySelectorAll('article').forEach(a=>{a.hidden=!(a.textContent.toLowerCase().includes(q)&&(!s||a.dataset.status===s)&&(!p||a.dataset.priority===p)&&(!c||a.dataset.category===c));});}document.getElementById('q').addEventListener('input',filter);document.getElementById('s').addEventListener('change',filter);document.getElementById('p').addEventListener('change',filter);document.getElementById('c').addEventListener('change',filter);</script></html>''' % (
@@ -703,6 +908,39 @@ def write_exclusive(path, data):
         raise OutputError('output read-back failed')
 
 
+LEGACY_LOCK = '.output.lock'
+
+
+def lock_output(root):
+    """Exclusive, non-blocking lock for one output directory; returns the fd to close.
+
+    0.4.1: the lock is taken on the output directory itself, so no file is left behind.
+    A lock file is used only when the filesystem refuses directory locks (for example
+    some NFS mounts). An existing lock file (0.4.0 or fallback) must stay owner-only.
+    """
+    import errno
+    import fcntl
+    legacy = root / LEGACY_LOCK
+    if legacy.exists() or legacy.is_symlink():
+        require_private(legacy)
+    fd = os.open(root, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | getattr(os, 'O_NOFOLLOW', 0))
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return fd
+    except OSError as exc:
+        os.close(fd)
+        if exc.errno in (errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK):
+            raise
+    fd = os.open(legacy, os.O_RDWR | os.O_CREAT | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+    try:
+        require_private(legacy)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
 def save(report, out_dir, force=False, *, renderers=None):
     started = time.monotonic()
     root = secure_dir(out_dir)
@@ -713,14 +951,12 @@ def save(report, out_dir, force=False, *, renderers=None):
         require_private(pointer)
     if pointer.exists() and not force:
         raise OutputError('existing result refused; --force required')
-    # fcntl is stdlib on the current Linux environment; the persistent lock file
-    # is never deleted, preventing lock-inode races and respecting no-delete policy.
-    import fcntl
-    fd = os.open(root / '.output.lock', os.O_RDWR | os.O_CREAT | getattr(os, 'O_NOFOLLOW', 0), 0o600)
     generation = root / ('run-' + uuid.uuid4().hex)
     try:
-        require_private(root / '.output.lock')
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fd = lock_output(root)
+    except OSError as exc:
+        raise OutputError('output directory busy or lock unavailable; previous committed set preserved') from exc
+    try:
         if pointer.exists() and not force:
             raise OutputError('concurrent result collision')
         generation.mkdir(mode=0o700)
@@ -819,7 +1055,7 @@ def main(argv=None, *, default_out_dir=None):
             if args.out_dir.resolve() == args.official_report.resolve() or (args.out_dir / 'CURRENT.json').resolve() == args.official_report.resolve() or ((args.out_dir / 'CURRENT.json').exists() and os.path.samefile(args.out_dir / 'CURRENT.json', args.official_report)):
                 raise OutputError('input/output collision')
             generation = save(report, args.out_dir, args.force)
-            print('결과 세트 확정: ' + str(generation))
+            print('결과 세트 확정: ' + str(generation.resolve()))
             print(result_summary_line(report))
         except (OutputError, OSError):
             print('출력 실패: 경로·충돌·접근권한을 확인하십시오. 기존 확정 결과를 보존합니다.', file=sys.stderr)

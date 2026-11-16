@@ -234,6 +234,26 @@ case $OUT_DIR in
     /*) ;;
     *) OUT_DIR=$PWD/$OUT_DIR ;;
 esac
+# 0.4.1: ../ 와 ./ 가 섞인 경로를 실제 절대 경로로 정리해 표시한다(가리키는 위치는 그대로).
+# 상위 디렉터리가 있으면 그 물리 경로(cd -P)를 쓰고, 마지막 이름은 그대로 둔다(심볼릭 링크 거부 검사를 유지).
+normalize_out_dir() {
+    local path=$1 parent base resolved
+    while [ "${#path}" -gt 1 ] && [ "${path%/}" != "$path" ]; do path=${path%/}; done
+    base=$(basename -- "$path")
+    parent=$(dirname -- "$path")
+    case $base in
+        .|..)
+            if resolved=$(cd -P -- "$path" 2>/dev/null && pwd -P); then printf '%s' "$resolved"; return; fi ;;
+        *)
+            if resolved=$(cd -P -- "$parent" 2>/dev/null && pwd -P); then
+                [ "$resolved" = / ] && resolved=
+                printf '%s/%s' "$resolved" "$base"
+                return
+            fi ;;
+    esac
+    printf '%s' "$1"
+}
+OUT_DIR=$(normalize_out_dir "$OUT_DIR")
 
 # ---------------------------------------------------------------- 사전 점검
 CHECK_LINES=()
@@ -406,7 +426,15 @@ verify_bundle() {
 
 file_owner_mode() {
     # 소유자 계정·UID와 권한(8진수)만 보여 준다. 파일 내용은 읽지 않는다.
-    stat -c '소유자 %U(UID %u), 권한 %a' -- "$1" 2>/dev/null || printf '%s' '소유자·권한 확인 불가'
+    # 계정 이름이 없는 UID(컨테이너 등)는 stat이 UNKNOWN으로 표시하므로 한국어로 바꾼다.
+    local info name uid mode
+    if info=$(stat -c '%U %u %a' -- "$1" 2>/dev/null); then
+        read -r name uid mode <<<"$info"
+        [ "$name" != UNKNOWN ] || name='이름 없는 계정'
+        printf '소유자 %s(UID %s), 권한 %s' "$name" "$uid" "$mode"
+    else
+        printf '%s' '소유자·권한 확인 불가'
+    fi
 }
 
 current_user() {
@@ -572,6 +600,7 @@ show_paths() {
     say "  manifest: $GENERATION/manifest.json"
     say "  최신 결과 포인터: $OUT_DIR/CURRENT.json"
     say "  서버에 브라우저가 없으면 결과 폴더를 승인된 방법으로 PC에 옮겨 HTML을 여십시오(외부 접속 불필요)."
+    say "    예(PC에서 실행): scp -r <계정>@<서버>:$GENERATION ."
 }
 
 case $rc in
