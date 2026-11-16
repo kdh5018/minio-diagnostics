@@ -15,3 +15,6 @@
 !/build-release.sh
 !/test_shell_release.py
 !/LICENSE
+!/docs/
+/docs/*
+!/docs/IMPROVEMENT_PLAN.md
