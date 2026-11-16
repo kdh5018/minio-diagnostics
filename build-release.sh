@@ -23,7 +23,7 @@ set -euo pipefail
 umask 022
 
 readonly PACKAGE_NAME=aistor-diag-analyzer
-readonly PACKAGE_VERSION=0.4.1
+readonly PACKAGE_VERSION=0.4.2
 readonly PBS_RELEASE=20261110
 readonly PBS_PYTHON=3.12.16
 readonly APP_FILES=(analyze.py aistordoctor.py r2_health.py r2_enrichment.py)
@@ -465,125 +465,64 @@ cat >"$STAGE/README-ko.txt" <<README
 MinIO AIStor 폐쇄망 진단 보고서 도구 $PACKAGE_VERSION ($TARGET_ID)
 ======================================================================
 
-이 폴더는 설치하지 않고 바로 실행하는 배포물입니다.
-Python 런타임이 포함되어 있으므로 서버에 Python·pip·패키지를 설치할 필요가 없습니다.
-실행 중 인터넷·SUBNET·MinIO 서버에 접속하지 않으며, 서버 설정을 바꾸지 않습니다.
-이미 수집된 진단 파일을 읽어 보고서만 만듭니다.
+이미 수집된 진단 파일을 읽어 HTML·Markdown·JSON 보고서를 만듭니다. 설치 없이 실행하며
+Python 런타임이 동봉되어 있습니다. 인터넷·SUBNET·MinIO 서버에 접속하거나 서버 설정을 바꾸지 않습니다.
+지원: $TARGET_DESC, glibc $MIN_GLIBC 이상, 일반 사용자 권한(그 밖의 환경은 실행 전 거부, 종료 코드 5).
 
-지원 환경
----------
-- $TARGET_DESC
-- glibc $MIN_GLIBC 이상, 일반 사용자 권한
-- 그 밖의 OS·CPU에서는 실행 전에 거부하며 아무것도 설치하지 않습니다.
-
-1. 반입과 압축 해제
--------------------
+1. 준비
+-------
   sha256sum -c $BUNDLE.tar.gz.sha256
-  tar -xzf $BUNDLE.tar.gz
-  cd $BUNDLE
+  tar -xzf $BUNDLE.tar.gz && cd $BUNDLE        # 실행 가능한 위치(예: 홈)에 해제, noexec 위치 불가
 
-  - 실행 권한이 있는 위치(예: 홈 디렉터리)에 압축 해제하십시오.
-    noexec로 마운트된 위치에서는 동봉 런타임을 실행할 수 없습니다.
-  - 압축 해제한 폴더는 읽기 전용이어도 됩니다. 결과는 별도 위치에 저장됩니다.
+  입력 파일은 일반 사용자 홈 아래 한 폴더에 둡니다. 원본은 읽기만 합니다.
+    PC에서: scp diag-report-*.md diag-data-*.json.gz <계정>@<서버>:~/aistor-diag-input/
+  - diag-report-<이름>_<시각>.md     공식 Markdown(--official-report)
+  - diag-data-<이름>_<시각>.json.gz  원본 gzip(--health). 같은 수집이면 <시각>이 같습니다.
 
-2. 입력 파일 두기
------------------
-  mc admin diag(또는 SUBNET)로 받은 파일을 서버의 일반 사용자 홈 아래 한 폴더에 둡니다.
-  예) PC에서:  scp diag-report-*.md diag-data-*.json.gz <계정>@<서버>:~/aistor-diag-input/
-      서버에서: ls -l ~/aistor-diag-input/
-  - diag-report-<이름>_<시각>.md      공식 Markdown 보고서(--official-report)
-  - diag-data-<이름>_<시각>.json.gz   원본 gzip(--health)
-  - 같은 수집에서 받은 두 파일은 이름의 <시각>이 같습니다. 원본 파일은 읽기만 하며 바꾸지 않습니다.
-
-3. 실행
+2. 실행
 -------
-  # 사전 점검만(분석 실행 안 함)
-  ./run-report.sh --check --verify-bundle
-
-  # 공식 Markdown 단독
-  ./run-report.sh --official-report "/경로/diag-report-....md"
-
-  # 원본 gzip 결합(제한 보고서 저장 허용)
-  ./run-report.sh --official-report "/경로/diag-report-....md" \\
+  ./run-report.sh --check --verify-bundle                       # 사전 점검만
+  ./run-report.sh --official-report "/경로/diag-report-....md" \
                   --health "/경로/diag-data-....json.gz" --allow-partial
+  (--health 없이 공식 Markdown 단독, --official-report 없이 원본 gzip 단독도 가능)
 
-  # 원본 gzip 단독, 우선순위 P2 이상 항목이 있으면 종료 코드 1
-  ./run-report.sh --health "/경로/diag-data-....json.gz" --fail-on-priority P2
+  주요 옵션: --mask strict|basic(기본 strict), --fail-on-priority P1~P4, --as-of <시간대 포함 시각>,
+  --lang ko, --out-dir <디렉터리>(기본 ~/aistor-diag-output), --force(기존 결과 보존, 새 세대 추가),
+  --use-system-python(검증된 python3 3.9 이상). 전체: ./run-report.sh --help
+  - 두 입력의 수집 시각 차가 120초를 넘거나 서버 대상이 다르면 결합을 거부합니다(종료 코드 2).
+    로컬에서 다시 만든 Markdown은 Date가 생성 시각이라 거부될 수 있으니 같은 수집 파일을 쓰십시오.
+  - 입력을 읽을 권한이 없으면 소유자 계정으로 실행하거나 읽을 수 있는 사본을 지정하십시오(원본 권한 변경 금지).
+  - 공백·한글 경로는 따옴표로 감싸고, 심볼릭 링크 대신 실제 경로를 지정하십시오.
 
-  - 공통 옵션(공식 Markdown 단독·원본 gzip 결합 모두): --lang ko, --mask strict|basic(기본 strict),
-    --fail-on-priority P1|P2|P3|P4, --as-of <시간대 포함 시각>, --allow-partial
-  - --official-report에는 .md, --health에는 .json.gz를 지정합니다. 서로 바꿔 지정하면
-    실행 전에 알려 줍니다.
-  - 두 파일은 같은 수집에서 나온 것이어야 합니다. 수집 시각 차가 120초를 넘거나 서버 대상이
-    다르면 결합을 거부하고(종료 코드 2) 시각 차·대상 수와 조치 방법을 표시합니다.
-    로컬에서 다시 만든 Markdown의 Date는 생성 시각이므로 원본과 차이가 날 수 있습니다.
-    이때는 같은 수집의 파일을 쓰거나 두 파일을 따로 분석하십시오.
-  - 입력 파일을 읽을 권한이 없으면(예: 다른 사용자 소유 0600) 소유자·권한을 표시합니다.
-    파일 소유자 계정으로 실행하거나 읽을 수 있는 사본을 만들어 지정하십시오.
-    원본 파일의 권한은 바꾸지 마십시오.
-
-  - 기본 저장 위치: ~/aistor-diag-output  (변경: --out-dir <디렉터리>)
-  - 같은 위치에 기존 결과가 있으면 --force가 필요합니다.
-    --force는 이전 결과를 지우거나 덮어쓰지 않고 새 세대를 추가합니다.
-  - 공백·한글이 들어간 경로는 따옴표로 감싸 지정하십시오.
-  - 입력·출력 경로에 심볼릭 링크는 쓰지 말고 실제 경로를 지정하십시오.
-  - 검증된 시스템 python3(3.9 이상)를 쓰려면 --use-system-python 을 지정합니다.
-  - 전체 옵션: ./run-report.sh --help
-
-4. 결과
+3. 결과
 -------
-  <저장 위치>/run-<id>/aistor-diag-report.html   브라우저로 직접 열기(웹 서버 불필요)
-  <저장 위치>/run-<id>/aistor-diag-report.md
-  <저장 위치>/run-<id>/aistor-diag-report.json
-  <저장 위치>/run-<id>/manifest.json             파일별 SHA-256
-  <저장 위치>/CURRENT.json                       최신 결과 세대 포인터
-
-  결과 보기: 서버에 브라우저가 없으면 run-<id> 폴더를 PC로 복사해 HTML을 여십시오.
-  실행이 끝나면 화면에 결과 폴더의 절대 경로가 표시됩니다. PC에서 받는 예:
+  <저장 위치>/run-<id>/ 아래 aistor-diag-report.html(브라우저로 열기)·.md·.json, manifest.json(SHA-256).
+  CURRENT.json은 최신 세대 포인터입니다. 폴더 700, 파일 600으로 저장됩니다.
+  서버에 브라우저가 없으면 화면에 표시된 절대 경로의 run-<id> 폴더만 PC로 복사합니다.
       scp -r <계정>@<서버>:/home/<계정>/aistor-diag-output/run-<id> .
-      sftp <계정>@<서버>   →  get -r /home/<계정>/aistor-diag-output/run-<id>
-  Windows 10 이상은 PowerShell에 scp·sftp가 기본으로 들어 있습니다(WinSCP 등 승인된 도구도 가능).
-  run-<id> 폴더 하나만 옮기면 됩니다. CURRENT.json은 서버의 최신 결과 표시용이라 옮길 필요가 없습니다.
-  보고서 상단에 공식 판정 요약, 하단에 확인된 정보·입력 결합 확인·원본 관측 정보·한계가 표로 나옵니다.
+  (Windows 10 이상 PowerShell에 scp·sftp 기본 포함, WinSCP 등 승인 도구도 가능)
+  .output.lock: 0.4.0까지 만들던 빈 잠금 파일입니다. 0.4.1부터는 디렉터리 잠금을 지원하지 않는
+  일부 NFS에서만 만듭니다. 실행 중이 아닐 때 지워도 되며 옮길 필요가 없습니다.
 
-  결과 폴더는 소유자 전용 권한(디렉터리 700, 파일 600)으로 저장됩니다.
-  .output.lock: 0.4.0까지 같은 위치에 동시에 저장하는 것을 막으려고 만들던 빈 파일입니다.
-    0.4.1부터는 저장 위치 디렉터리 자체를 잠가 이 파일을 만들지 않습니다(디렉터리 잠금을 지원하지 않는
-    일부 NFS 등에서만 예외로 만듭니다). 이미 있는 파일은 내용이 없으며, 실행 중이 아닐 때 지워도 됩니다.
-    PC로 옮길 필요는 없습니다.
-  보고서는 마스킹을 적용하지만, 외부 공유 전에는 반드시 직접 검토하십시오.
-
-5. 종료 코드
+4. 종료 코드
 ------------
-  0  요청 범위 처리 성공(시스템이 정상이라는 판정은 아님)
-  1  --fail-on-priority 조건에 해당하는 항목 있음(두 실행 방식 공통)
-  2  입력 오류(파일 없음·권한·형식·인코딩·크기 제한·두 입력 결합 거부). 원인과 조치가 함께 표시됨
-  3  마스킹·보호 저장 실패, 출력 위치 문제(기존 결과는 보존)
-  4  부분 분석. --allow-partial을 지정했다면 제한 보고서가 저장되고 경로가 표시됨
-  5  지원하지 않는 실행 환경(분석 미실행, 설치 시도 없음)
+  0 처리 성공(시스템 정상 판정 아님)   1 --fail-on-priority 조건 충족
+  2 입력 오류(원인·조치 표시)           3 마스킹·보호 저장 실패(기존 결과 보존)
+  4 부분 분석(--allow-partial이면 제한 보고서 저장)   5 지원하지 않는 실행 환경
 
-6. 해석 시 주의
+5. 해석 시 주의
 ---------------
-- 공식 판정(official_status)과 이 도구의 자체 점검·해설은 서로 다른 것입니다.
-- 미평가·미제공·수집 오류 항목은 정상 판정이 아닙니다.
-- 부분 분석(4)은 자료가 부족하다는 뜻이며 오류를 숨기지 않습니다.
-- THP 자체 점검은 공식 sys.mem.thp 검사 Resolution의 권장값(enabled=madvise, defrag=defer+madvise
-  또는 madvise, max_ptes_none=0)과 관측값을 비교한 결과입니다. 공식 판정이 우선합니다.
-- 인증서 남은 시간은 두 가지로 표시됩니다. "수집 시각 기준"은 진단 파일을 받은 시점 값이고,
-  "보고서 생성 시각 기준"은 이 보고서를 만든 시점 값입니다. 수집 뒤 시간이 지났다면 뒤의 값을 보십시오.
-  특정 시각 기준으로 다시 보려면 --as-of 를 씁니다. 예) --as-of 2026-11-16T09:00:00+09:00
-- 표준 커널·부팅 설정 경로(/proc/cmdline, /etc/default/grub, /sys/kernel/mm/transparent_hugepage/... 등)와
-  공개 문서 주소(docs.min.io, kernel.org, go.dev 등)는 조치 안내를 읽을 수 있도록 원문 그대로 둡니다.
-  서버 주소·IP·호스트명은 계속 identifier-NNN으로 가립니다.
-- 수집 오류 유형(예: CPU 주파수 정책 / 파일 없음)은 고정 분류이며 원인을 확정하지 않습니다.
-  sys.errors가 없거나 형식이 다른 행이 있으면 오류 행 수는 "최소 N"으로 표시됩니다.
+- 공식 판정과 이 도구의 자체 점검은 별개이며 공식 판정이 우선합니다. 미평가·미제공·수집 오류는 정상이 아닙니다.
+- 인증서 남은 시간은 "수집 시각 기준"과 "보고서 생성 시각 기준"으로 표시합니다. 특정 시각은 --as-of로 봅니다.
+- 서버 주소·IP·호스트명은 identifier-NNN으로 가립니다(표준 커널 경로·공개 문서 주소는 그대로).
+  마스킹을 적용해도 외부 공유 전에는 직접 검토하십시오.
+- 수집 오류 유형은 고정 분류이며 원인을 확정하지 않습니다. 행 수가 "최소 N"일 수 있습니다.
 
-7. 배포물 정보
+6. 배포물 정보
 --------------
-- 버전·대상·런타임·소스 커밋: RELEASE-INFO
-- 배포물 내부 파일 체크섬: SHA256SUMS (./run-report.sh --verify-bundle 로 검증)
-- 라이선스: LICENSE(사내·고객사 전용), 런타임 제3자 고지는 licenses/
-- 업데이트 시 새 버전을 다른 폴더에 압축 해제하고, 이전 버전 폴더와 결과는 그대로 보존하십시오.
+  RELEASE-INFO(버전·런타임·소스 커밋), SHA256SUMS(--verify-bundle로 검증),
+  LICENSE(사내·고객사 전용), licenses/(런타임 제3자 고지).
+  업데이트는 새 폴더에 해제하고 이전 폴더와 결과는 보존하십시오.
 README
 
 # ---------------------------------------------------------------- 검사·체크섬·묶기
