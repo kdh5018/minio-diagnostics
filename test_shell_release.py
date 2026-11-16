@@ -601,6 +601,8 @@ class ReleasePackagingTests(unittest.TestCase):
             'python/include/python3.12/Python.h': (b'', 0o644),
             'python/lib/python3.12/LICENSE.txt': (b'PSF LICENSE (fake)\n', 0o644),
             'python/lib/python3.12/os.py': (b'# fake\n', 0o644),
+            'python/lib/python3.12/encodings/__pycache__/utf_8.cpython-312.pyc': (b'stale', 0o644),
+            'python/lib/python3.12/__pycache__/os.cpython-312.pyc': (b'stale', 0o644),
             'python/lib/python3.12/test/test_fake.py': (b'# fake\n', 0o644),
             'python/lib/python3.12/site-packages/pip/__init__.py': (b'', 0o644),
             'python/lib/python3.12/ensurepip/__init__.py': (b'', 0o644),
@@ -874,8 +876,9 @@ def verify_release_tarball(test, tarball, fake_runtime=False):
             test.assertFalse(forbidden_parts.intersection(parts), path)
             test.assertFalse(path.endswith(('.json.gz', '.bak', '.orig', '.log')), path)
             test.assertFalse('diag-report' in path or 'diag-data' in path, path)
-            if not path.startswith('runtime/'):
-                test.assertNotIn('__pycache__', parts, path)
+            # 0.5.1: 런타임 포함 어디에도 바이트코드 캐시가 없어야 한다(직접 실행 시 재작성 → 체크섬 불일치 방지).
+            test.assertNotIn('__pycache__', parts, path)
+            test.assertFalse(path.endswith('.pyc'), path)
             test.assertFalse(path.startswith('runtime/python/bin/pip'), path)
             test.assertNotIn('site-packages/pip', path)
             if path.startswith('runtime/python/lib/python3.') and '/test/' in path + '/':

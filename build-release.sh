@@ -23,7 +23,7 @@ set -euo pipefail
 umask 022
 
 readonly PACKAGE_NAME=aistor-diag-analyzer
-readonly PACKAGE_VERSION=0.5.0
+readonly PACKAGE_VERSION=0.5.1
 readonly PBS_RELEASE=20261110
 readonly PBS_PYTHON=3.12.16
 readonly APP_FILES=(analyze.py aistordoctor.py r2_health.py r2_enrichment.py)
@@ -399,6 +399,11 @@ rm -rf -- "$PYLIB"/config-3.* "$PYLIB"/site-packages/pip* "$PYLIB"/site-packages
     "$PYROOT"/lib/thread[0-9]* "$PYROOT"/bin/pip* "$PYROOT"/bin/idle* "$PYROOT"/bin/2to3* \
     "$PYROOT"/bin/pydoc* "$PYROOT"/bin/python3*-config
 [ -x "$PYROOT/bin/python3" ] || die "런타임 실행 파일(bin/python3)이 없습니다."
+# 0.5.1: 런타임에 딸려 온 바이트코드 캐시는 넣지 않는다. 아래에서 모든 파일 시각을 SOURCE_DATE_EPOCH로
+# 맞추면 캐시가 원본보다 오래된 것으로 보여, 동봉 Python을 -B 없이 직접 실행할 때 다시 써져
+# --verify-bundle이 체크섬 불일치로 실패했다. 분석기는 항상 -B로 실행하므로 캐시가 없어도 된다.
+find "$PYROOT" -depth -type d -name '__pycache__' -exec rm -rf -- {} +
+find "$PYROOT" -type f -name '*.pyc' -exec rm -f -- {} +
 
 # 런타임이 요구하는 glibc 기호 버전이 대상 최소 glibc 이하인지 확인한다.
 max_glibc=$(find "$PYROOT" -type f \( -name '*.so*' -o -path '*/bin/python3*' \) -print0 |
@@ -486,6 +491,13 @@ Python 런타임이 동봉되어 있습니다. 인터넷·SUBNET·MinIO 서버�
 -------
   sha256sum -c $BUNDLE.tar.gz.sha256
   tar -xzf $BUNDLE.tar.gz && cd $BUNDLE        # 실행 가능한 위치(예: 홈)에 해제, noexec 위치 불가
+  - 압축 해제에 tar·gzip이 필요합니다(최소 설치 이미지에는 없을 수 있음). 없으면 다른 서버에서 풀어
+    폴더째 복사하십시오. 읽기 전용 위치에 둔 폴더에서도 실행됩니다.
+  - ./run-report.sh가 "Permission denied"(종료 126)로 바로 끝나면 해제 위치가 noexec입니다.
+    홈 등 실행 가능한 위치에 다시 해제하십시오.
+  - SELinux enforcing(targeted 기본 정책)에서 별도 설정 없이 동작합니다. 정책·boolean을 바꾸지 마십시오.
+  - 저장 위치는 권한 700을 지킬 수 있는 파일시스템이어야 합니다. Windows 공유 폴더처럼 권한이
+    적용되지 않는 곳은 저장을 거부합니다(종료 코드 3).
 
   입력 파일은 일반 사용자 홈 아래 한 폴더에 둡니다. 원본은 읽기만 합니다.
     PC에서: scp diag-report-*.md diag-data-*.json.gz <계정>@<서버>:~/aistor-diag-input/
