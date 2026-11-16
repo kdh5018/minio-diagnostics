@@ -11,3 +11,6 @@
 !/r2_health.py
 !/r2_enrichment.py
 !/test_r2.py
+!/run-report.sh
+!/build-release.sh
+!/test_shell_release.py
