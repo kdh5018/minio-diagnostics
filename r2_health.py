@@ -419,18 +419,209 @@ def observations_html(r):
     return '<section id="raw-observations">' + a.blocks_html(blocks) + '</section>' if blocks else ''
 
 
+# --- 0.5.0 도식 화면(표시 전용) ----------------------------------------------------
+# 이미 보고서에 실리는 허용 필드(별칭·상태·카운터·고정 분류)만 그린다. 새 판정을 만들지 않는다.
+STATE_UI = {'ok': ('passed', '✔', 'ok'), 'offline': ('error', '✖', 'offline')}
+THP_COLUMNS = (('thp_enabled', 'THP enabled'), ('thp_defrag', 'THP defrag'), ('thp_max_ptes_none', 'max_ptes_none'))
+
+
+def usage(d):
+    total, used = d.get('totalspace'), d.get('usedspace')
+    if not isinstance(total, int) or not isinstance(used, int) or total <= 0:
+        return None
+    return used * 100.0 / total
+
+
+def drive_cell(d):
+    tone, icon, word = STATE_UI.get(d.get('state'), ('unknown', '?', '상태 미확인'))
+    pct = usage(d)
+    if pct is None:
+        meter, text = '', '사용률 계산 불가(카운터 없음)'
+    elif pct > 100:
+        meter, text = '<span class="meter"><span class="fill u-hi" style="width:100%"></span></span>', '카운터 범위 벗어남(used > total)'
+    else:
+        band = 'hi' if pct >= 90 else 'mid' if pct >= 70 else 'lo'
+        meter = '<span class="meter" role="img" aria-label="사용 %.1f%%"><span class="fill u-%s" style="width:%.1f%%"></span></span>' % (pct, band, pct)
+        text = '사용 %.1f%%' % pct
+    index = ' · '.join('%s %s' % (name, d.get(key)) for name, key in (('pool', 'pool_index'), ('set', 'set_index'), ('disk', 'disk_index'))
+                       if d.get(key) is not None) or '인덱스 없음'
+    return ('<li class="drv tone-%s"><span class="drv-id">%s</span><span class="drv-st"><span aria-hidden="true">%s</span> %s</span>'
+            '<span class="drv-ix">%s</span>%s<span class="drv-u">%s</span></li>') % (
+        tone, a.esc('drive-' + d['id'].rsplit('-drive-', 1)[-1]), icon, a.esc(word), a.esc(index), meter, a.esc(text))
+
+
+def drive_grid_html(n):
+    by_server = {}
+    for d in n['drives']:
+        by_server.setdefault(d['server_id'], []).append(d)
+    blocks = []
+    for s in n['servers']:
+        drives = by_server.get(s['id'], [])
+        states = Counter(d.get('state') or 'unknown' for d in drives)
+        summary = ' · '.join(x for x in ('✔ ok %d' % states['ok'] if states['ok'] else '', '✖ offline %d' % states['offline'] if states['offline'] else '',
+                                         '? 미확인 %d' % states['unknown'] if states['unknown'] else '') if x) or '드라이브 기록 없음'
+        tone = 'error' if states['offline'] else 'unknown' if states['unknown'] or not drives else 'passed'
+        blocks.append('<div class="srv tone-b-%s"><div class="srv-h"><strong>%s</strong><span class="muted">버전 %s</span><span>드라이브 %d개 · %s</span></div><ul class="drives">%s</ul></div>' % (
+            tone, a.esc(s['id']), a.esc(s['version'] or a.MISSING), len(drives), a.esc(summary), ''.join(drive_cell(d) for d in drives)))
+    groups = n.get('topology', {}).get('groups') or []
+    topo = '<p class="note">pool·set 인덱스별 드라이브 기록: %s (quorum·장애 도메인은 추론하지 않음)</p>' % a.esc(
+        ', '.join('pool %s / set %s: %s개' % (g['pool_index'], g['set_index'], g['observed_drive_records']) for g in groups) or '인덱스 없음')
+    states = Counter(d.get('state') or 'unknown' for d in n['drives'])
+    legend = ('<p class="legend"><span class="badge sev-passed">✔ ok</span> <span class="badge sev-error">✖ offline</span> '
+              '<span class="badge sev-unknown">? 상태 미확인</span> · 막대: 사용률 '
+              '<span class="key u-lo"></span>70% 미만 <span class="key u-mid"></span>70~90% <span class="key u-hi"></span>90% 이상 '
+              '(표시용 구간이며 판정 아님)</p>')
+    return ('<section id="topology" aria-labelledby="topology-h"><h2 id="topology-h">서버 × 드라이브</h2>'
+            '<p class="note">서버 %d개 · 드라이브 %d개 기록 (ok %d · offline %d · 미확인 %d). 원본 카운터 기준 비율이며 단위·성능·물리 배치를 확정하지 않습니다.</p>%s'
+            '<div class="srvgrid">%s</div>%s</section>') % (
+        len(n['servers']), len(n['drives']), states['ok'], states['offline'], states['unknown'], legend, ''.join(blocks), topo)
+
+
+def majority(values):
+    present = [v for v in values if v is not None]
+    if len(present) < 2:
+        return None
+    value, count = Counter(present).most_common(1)[0]
+    return value if count > len(present) / 2 else None
+
+
+def config_cell(value, ok=None, differs=False):
+    if value is None:
+        return '<td class="c-na"><span aria-hidden="true">—</span> 미관측</td>'
+    if ok is True:
+        return '<td class="c-ok"><span aria-hidden="true">✔</span> %s</td>' % a.esc(value)
+    if ok is False:
+        return '<td class="c-bad"><span aria-hidden="true">✖</span> <strong>%s</strong> <small>권장과 다름</small></td>' % a.esc(value)
+    if differs:
+        return '<td class="c-warn"><span aria-hidden="true">▲</span> <strong>%s</strong> <small>다른 서버와 다름</small></td>' % a.esc(value)
+    return '<td>%s</td>' % a.esc(value)
+
+
+def config_table_html(n):
+    configs = n.get('system_configurations') or []
+    if not configs:
+        return ('config', '시스템 설정', '<section id="config"><h2>시스템 설정 비교 (THP·IOMMU·rlimit)</h2><p>설정 기록이 없습니다(미관측).</p></section>')
+    iommu = [', '.join('%s=%s' % (k, v if v is not None else '모호') for k, v in sorted(c['iommu_flags'].items())) or None for c in configs]
+    rlimits = [c['rlimit_max'] for c in configs]
+    common_iommu, common_rlimit = majority(iommu), majority(rlimits)
+    head = ''.join('<th scope="col">%s</th>' % a.esc(x) for x in ('서버', 'THP enabled', 'THP defrag', 'max_ptes_none', '명시적 IOMMU 옵션', 'rlimit-max'))
+    rec = enrichment.THP_OFFICIAL_RECOMMENDED
+    recommended = ('<tr class="rec"><th scope="row">권장값</th>%s<td>서버 간 동일<br><small>고정 권장값 없음</small></td><td>기준 없음<br><small>표시만</small></td></tr>' %
+                   ''.join('<td>%s<br><small>공식 sys.mem.thp Resolution</small></td>' % a.esc(' 또는 '.join(str(v) for v in rec[key])) for key, _ in THP_COLUMNS))
+    rows = []
+    mismatches = 0
+    for c, flags, rlimit in zip(configs, iommu, rlimits):
+        cells = []
+        for key, _ in THP_COLUMNS:
+            value = c.get(key)
+            ok = None if value is None else value in rec[key]
+            mismatches += ok is False
+            cells.append(config_cell(value, ok))
+        cells.append(config_cell(flags, differs=common_iommu is not None and flags != common_iommu) if flags else
+                     '<td class="c-na"><span aria-hidden="true">—</span> 명시 없음</td>')
+        cells.append(config_cell(rlimit, differs=common_rlimit is not None and rlimit != common_rlimit))
+        rows.append('<tr><th scope="row">%s</th>%s</tr>' % (a.esc(c['server_id'] or c['id'] + ' (대상 미확인)'), ''.join(cells)))
+    return ('config', '시스템 설정',
+            '<section id="config" aria-labelledby="config-h"><h2 id="config-h">시스템 설정 비교 (THP·IOMMU·rlimit)</h2>'
+            '<p class="note">권장값과 다른 칸 %d개. <span class="c-bad">✖ 권장과 다름</span> · <span class="c-warn">▲ 다른 서버와 다름</span> · '
+            '<span class="c-ok">✔ 권장과 같음</span> · — 미관측. 공식 판정은 공식 보고서 결과가 우선하며 이 표는 자동 변경을 뜻하지 않습니다.</p>'
+            '<div class="table-scroll"><table class="cmp"><thead><tr>%s</tr></thead><tbody>%s%s</tbody></table></div></section>' % (
+                mismatches, head, recommended, ''.join(rows)))
+
+
+def collection_html(n):
+    collection = n['collection']
+    sections = collection['sections']
+    peak = max([v['reported_errors'] for v in sections.values() if isinstance(v.get('reported_errors'), int)] + [1])
+    bars = []
+    for key, v in sections.items():
+        name = SECTION_LABELS.get(key, key)
+        if v['status'] != 'provided':
+            bars.append('<li class="cbar na"><span class="cbar-k">%s</span><span class="cbar-t">미제공 / 미지원</span></li>' % a.esc(name))
+            continue
+        errs = v['reported_errors']
+        bars.append('<li class="cbar"><span class="cbar-k">%s</span><span class="cbar-track"><span class="cbar-fill%s" style="width:%.1f%%"></span></span>'
+                    '<span class="cbar-t">%s오류 행 %d / 기록 %d</span></li>' % (
+                        a.esc(name), ' zero' if not errs else '', errs * 100.0 / peak if errs else 0, '✖ ' if errs else '', errs, v['records']))
+    types = collection.get('error_type_counts') or {}
+    subjects, kinds = [], []
+    for key in types:
+        subject, _, kind = key.partition(' / ')
+        subjects += [subject] if subject not in subjects else []
+        kinds += [kind] if kind not in kinds else []
+    heat = ''
+    if types:
+        top = max(types.values())
+        rows = ''
+        for subject in subjects:
+            cells = ''
+            for kind in kinds:
+                count = types.get(subject + ' / ' + kind, 0)
+                level = 0 if not count else min(4, 1 + int(3 * count / top))
+                cells += '<td class="heat h%d">%s</td>' % (level, count if count else '·')
+            rows += '<tr><th scope="row">%s</th>%s</tr>' % (a.esc(subject), cells)
+        heat = ('<h3>대상 × 유형 (고정 분류, 원인 확정 아님)</h3><div class="table-scroll"><table class="heatmap"><thead><tr><th>대상 ↓ · 유형 →</th>%s</tr></thead><tbody>%s</tbody></table></div>'
+                % (''.join('<th scope="col">%s</th>' % a.esc(k) for k in kinds), rows))
+    reasons = collection.get('incomplete_reasons') or []
+    caveat = ' 전체 수 미확정: ' + ', '.join(INCOMPLETE_LABELS.get(x) or ('형식 이상 행: ' + SECTION_LABELS.get(x.split(':', 1)[-1], x)) for x in reasons) + '.' if reasons else ''
+    count = error_count_text(collection)
+    return ('<section id="collection" aria-labelledby="collection-h"><h2 id="collection-h">수집 오류 (공식 검사 오류와 별도)</h2>'
+            '<p class="note">오류가 기록된 행: <strong>%s</strong>. 오류 본문·내부 주소는 내보내지 않습니다. 기록이 없다는 것은 전체 수집 성공의 증거가 아닙니다.%s</p>'
+            '<h3>수집 영역별 오류 행</h3><ul class="cbars">%s</ul>%s</section>') % (
+        a.esc(a.MISSING if count is None else count), a.esc(caveat), ''.join(bars), heat)
+
+
+R2_CSS = '''<style>
+.srvgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}
+.srv{background:var(--card);border:1px solid var(--line);border-top:5px solid var(--unknown);border-radius:10px;padding:10px 12px}
+.srv.tone-b-passed{border-top-color:var(--passed)}.srv.tone-b-error{border-top-color:var(--error)}
+.srv-h{display:flex;flex-wrap:wrap;gap:4px 10px;align-items:baseline;margin-bottom:8px;font-size:14px}
+.drives{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(auto-fill,minmax(128px,1fr));gap:6px}
+.drv{display:flex;flex-direction:column;gap:2px;border:1px solid var(--line);border-left:4px solid var(--unknown);border-radius:6px;padding:6px 8px;font-size:12px;background:var(--card);color:var(--fg)}
+.drv.tone-passed{border-left-color:var(--passed)}.drv.tone-error{border-left-color:var(--error);background:var(--error-bg)}
+.drv-id{font-weight:700}.drv-st{font-weight:600}.drv.tone-passed .drv-st{color:var(--passed)}.drv.tone-error .drv-st{color:var(--error)}.drv-ix,.drv-u{color:var(--muted)}
+.meter{display:block;height:8px;border-radius:4px;background:var(--bar);overflow:hidden}.fill{display:block;height:100%}
+.u-lo{background:var(--accent)}.u-mid{background:var(--warning)}.u-hi{background:var(--error)}
+.key{display:inline-block;width:12px;height:8px;border-radius:2px;margin:0 3px 0 6px}.legend{font-size:13px;color:var(--muted)}
+.cmp td,.cmp th{min-width:110px}.cmp .rec td,.cmp .rec th{background:var(--bar)}
+.c-ok{color:var(--passed)}.c-bad{background:var(--error-bg);color:var(--error)}.c-warn{background:var(--warning-bg);color:var(--warning)}.c-na{color:var(--muted)}
+td.c-bad strong,td.c-warn strong{color:inherit}
+.cbars{list-style:none;padding:0;margin:0;display:grid;gap:6px;max-width:760px}
+.cbar{display:grid;grid-template-columns:130px minmax(80px,1fr) 150px;gap:10px;align-items:center;font-size:14px}
+.cbar.na{color:var(--muted)}.cbar.na .cbar-t{grid-column:2/4}
+.cbar-track{height:14px;background:var(--bar);border-radius:4px;overflow:hidden}.cbar-fill{display:block;height:100%;background:var(--error)}
+.heatmap td{text-align:center;min-width:90px;font-weight:700}.heat.h0{color:var(--muted);font-weight:400}
+.heat.h1{background:color-mix(in srgb,var(--error) 18%,var(--card))}.heat.h2{background:color-mix(in srgb,var(--error) 35%,var(--card))}
+.heat.h3{background:color-mix(in srgb,var(--error) 55%,var(--card))}.heat.h4{background:color-mix(in srgb,var(--error) 75%,var(--card));color:#fff}
+@media (max-width:600px){.cbar{grid-template-columns:1fr}}
+</style>'''
+
+
+def health_dashboard(r, n):
+    states = Counter(d.get('state') or 'unknown' for d in n['drives'])
+    count = error_count_text(n['collection'])
+    link = (r.get('input_link') or {}).get('status')
+    return ('<div class="panel"><h3>원본 관측 (gzip)</h3><div class="tiles">%s%s%s</div><p class="note">입력 결합: %s</p></div>') % (
+        a.tile('info', '서버 기록', len(n['servers'])),
+        a.tile('error' if states['offline'] else 'info', '드라이브 기록', len(n['drives']),
+               'ok %d · offline %d · 미확인 %d' % (states['ok'], states['offline'], states['unknown'])),
+        a.tile('warning' if count else 'info', '수집 오류 행', count), a.esc(a.label(link)))
+
+
 def html_report(r):
     v = view(r)
-    body = a.html_report(v)
-    body = body.replace('<div class="filters">', observations_html(r) + '<div class="filters">', 1)
+    n = r.get('facts', {}).get('health')
     # 필터 값(value)은 data-status와 같은 원래 문자열, 보이는 글자는 한국어로 둔다.
     labels = sorted({(f['official_status'], a.status_text(f)) for f in v['findings'] if f['origin'] == 'custom_rule'})
-    options = ''.join('<option value="%s">%s</option>' % (a.esc(value), a.esc(text))
-                      for value, text in labels)
-    passed = '<option value="passed">통과 (passed)</option>'
-    body = body.replace(passed, passed + options)
-    body = body.replace('<option>미분류</option>', '<option>미분류</option><option>용량</option>')
-    return body.replace('<label>공식 상태 ', '<label>공식/자체 결과 ')
+    sections, extra, raw = [], '', []
+    if isinstance(n, dict):
+        extra = health_dashboard(r, n)
+        sections = [('topology', '서버 × 드라이브', drive_grid_html(n)), config_table_html(n), ('collection', '수집 오류', collection_html(n))]
+        raw = [('raw', '원본 관측 표', '<section id="raw"><details class="appendix"><summary>원본 관측 표 전체 (서버·드라이브·설정·수집 영역)</summary>%s</details></section>'
+                % observations_html(r))]
+    page = a.html_page(v, sections=sections, dashboard_extra=extra, status_options=labels,
+                       categories=a.R1_CATEGORIES + ('용량',), before_appendix=raw)
+    return page.replace('</style>', '</style>' + R2_CSS, 1)
 
 
 def markdown_report(r):

@@ -875,44 +875,247 @@ def markdown(report, extra_blocks=None):
     return '\n'.join(out)
 
 
+# --- HTML 화면(0.5.0) ---------------------------------------------------------
+# 표시 계층만 담당한다. 판정·마스킹·Markdown/JSON 출력은 바꾸지 않는다.
+# 외부 자원 없이 인라인 CSS/SVG와 약간의 순수 JS만 쓰며, JS가 꺼져도 모든 내용이 보인다.
+SEVERITY_UI = {'error': ('✖', '오류'), 'warning': ('▲', '경고'), 'passed': ('✔', '통과'), 'unknown': ('?', '미평가')}
+SEVERITY_ORDER = {'error': 0, 'warning': 1, 'unknown': 2, 'passed': 3}
+PRIORITY_ORDER = {'P1': 0, 'P2': 1, 'P3': 2, 'P4': 3}
+
+
+def severity(finding):
+    """Display bucket only: official status for imported checks, own result for custom rules."""
+    if finding.get('origin') == 'custom_rule':
+        return {'fail': 'error', 'warning': 'warning', 'pass': 'passed'}.get(finding.get('rule_result'), 'unknown')
+    status = finding.get('official_status')
+    return status if status in ('error', 'warning', 'passed') else 'unknown'
+
+
+def badge(sev, text=None, cls='sev'):
+    icon, word = SEVERITY_UI[sev]
+    return '<span class="badge %s-%s"><span aria-hidden="true">%s</span> %s</span>' % (cls, sev, icon, esc(text or word))
+
+
+def stack_bar(parts, label_text):
+    """Proportion bar; every segment also has a text label next to it."""
+    total = sum(v for _, v, _ in parts if isinstance(v, int) and v > 0)
+    if not total:
+        return ''
+    segs = ''.join('<span class="seg sev-%s" style="flex:%d" title="%s %d"></span>' % (sev, v, esc(name), v)
+                   for sev, v, name in parts if isinstance(v, int) and v > 0)
+    return '<div class="stack" role="img" aria-label="%s">%s</div>' % (esc(label_text), segs)
+
+
+def tile(sev, name, value, sub=''):
+    icon = SEVERITY_UI[sev][0] if sev in SEVERITY_UI else ''
+    value = MISSING if value is None else value
+    return ('<div class="tile tone-%s"><div class="tile-k"><span aria-hidden="true">%s</span> %s</div>'
+            '<div class="tile-v">%s</div>%s</div>') % (sev, icon, esc(name), esc(value), '<div class="tile-s">%s</div>' % esc(sub) if sub else '')
+
+
+def conclusion_text(report):
+    """One cautious line. Never states that the service is healthy."""
+    parts, issues = [], 0
+    summary = report.get('official_summary')
+    if isinstance(summary, dict):
+        parts.append('공식 검사(mc) 오류 %s건·경고 %s건' % (summary.get('errors'), summary.get('warnings')))
+        issues += sum(v for k, v in summary.items() if k in ('errors', 'warnings') and isinstance(v, int))
+    custom = (report.get('analysis_summary') or {}).get('custom_rule_counts')
+    if isinstance(custom, dict):
+        parts.append('자체 점검 실패 %s건·경고 %s건·미평가 %s건' % (custom.get('fail', 0), custom.get('warning', 0), custom.get('not_evaluated', 0)))
+        issues += sum(custom.get(k, 0) for k in ('fail', 'warning', 'not_evaluated'))
+    head = ', '.join(parts) or '판정 자료 없음'
+    verdict = '이 있어 확인이 필요합니다.' if issues else '으로, 보고된 오류·경고는 없습니다.'
+    return head + verdict + ' 수집 시점의 기록을 분석한 결과이며 현재 서비스 상태를 확정하지 않습니다.'
+
+
+def dashboard_html(report, extra=''):
+    summary = report.get('official_summary')
+    findings = report.get('findings') or []
+    blocks = []
+    if isinstance(summary, dict):
+        blocks.append('<div class="panel"><h3>공식 판정 (mc 보고서)</h3><div class="tiles">%s%s%s</div>%s<p class="note">%s</p></div>' % (
+            tile('passed', '통과', summary.get('passed')), tile('error', '오류', summary.get('errors')), tile('warning', '경고', summary.get('warnings')),
+            stack_bar([('passed', summary.get('passed'), '통과'), ('error', summary.get('errors'), '오류'), ('warning', summary.get('warnings'), '경고')],
+                      '공식 판정 비율: ' + summary_text(summary)),
+            '공식 판정(mc 보고서) ' + summary_text(summary)))
+    else:
+        blocks.append('<div class="panel"><h3>공식 판정 (mc 보고서)</h3><p class="note">%s</p></div>' % esc(summary_text(summary)))
+    custom = (report.get('analysis_summary') or {}).get('custom_rule_counts')
+    if isinstance(custom, dict):
+        blocks.append('<div class="panel"><h3>자체 점검 결과 (이 도구, 공식 판정과 별개)</h3><div class="tiles">%s%s%s%s</div>%s</div>' % (
+            tile('passed', '통과', custom.get('pass', 0)), tile('error', '실패', custom.get('fail', 0)),
+            tile('warning', '경고', custom.get('warning', 0)), tile('unknown', '미평가', custom.get('not_evaluated', 0)),
+            stack_bar([('passed', custom.get('pass', 0), '통과'), ('error', custom.get('fail', 0), '실패'),
+                       ('warning', custom.get('warning', 0), '경고'), ('unknown', custom.get('not_evaluated', 0), '미평가')], '자체 점검 결과 비율')))
+    open_findings = [f for f in findings if severity(f) != 'passed']
+    priorities = Counter(f.get('priority') for f in open_findings)
+    blocks.append('<div class="panel"><h3>해설 우선순위 (통과 제외, 이 도구 기준·공식 심각도 아님)</h3><div class="tiles prio">%s</div></div>' % ''.join(
+        '<div class="tile tone-p%s"><div class="tile-k">%s</div><div class="tile-v">%d</div></div>' % (
+            key[-1] if key in PRIORITY_ORDER else 'u', esc(key if key in PRIORITY_ORDER else '미분류'), priorities.get(key, 0))
+        for key in ('P1', 'P2', 'P3', 'P4', 'unclassified')))
+    return ('<section id="dashboard" aria-labelledby="dashboard-h"><h2 id="dashboard-h">요약</h2>'
+            '<p class="conclusion"><span aria-hidden="true">ⓘ</span> %s</p><div class="panels">%s%s</div></section>') % (
+        esc(conclusion_text(report)), ''.join(blocks), extra)
+
+
+def evidence_html(blocks):
+    out = []
+    for block in blocks:
+        out.append('<p class="loc">근거 구간: %s / 줄 %s</p>' % (esc(label(block['section'])), esc(block['source_locator']['line'])))
+        if block['type'] == 'table':
+            out.append(blocks_html([('table', block['headers'], block['rows'])]))
+        else:
+            out.append('<pre>%s</pre>' % esc(block['text']))
+    return ''.join(out)
+
+
+def finding_card(f):
+    sev = severity(f)
+    custom = f.get('origin') == 'custom_rule'
+    if custom:
+        verdict = ('<div class="box own-verdict"><h4>%s 자체 점검 판정 <small>(이 도구, 공식 판정 아님)</small></h4><p>%s</p>'
+                   '<p class="muted">판정 조건: %s</p></div>') % (
+            badge(sev, '자체 결과: ' + result_text(f.get('rule_result'))), esc(f['observed']), esc(f.get('detail') or ''))
+    else:
+        verdict = '<div class="box official"><h4>%s 공식 판정 <small>(mc 보고서)</small></h4><p>%s</p></div>' % (
+            badge(sev, '공식: ' + status_text(f)), esc(f['observed']))
+    steps = ''.join('<li>%s</li>' % esc(step) for step in f['verification_steps'])
+    resolution = [b for b in f['evidence_blocks'] if b.get('section') == 'resolution']
+    other = [b for b in f['evidence_blocks'] if b.get('section') != 'resolution']
+    evidence = ''
+    if resolution:
+        evidence += '<details open><summary>공식 조치 안내(Resolution, 마스킹)</summary>%s</details>' % evidence_html(resolution)
+    if other or not f['evidence_blocks']:
+        evidence += '<details><summary>마스킹된 근거</summary>%s</details>' % (evidence_html(other) or '<pre>%s</pre>' % esc(f['detail']))
+    meta = '<span class="chip">우선순위 %s</span><span class="chip">영역 %s</span>' % (esc(priority_text(f['priority'])), esc(f['category']))
+    return ('<article class="card sev-%s" data-sev="%s" data-status="%s" data-priority="%s" data-category="%s">'
+            '<header class="card-h">%s<h3>%s</h3><div class="chips">%s</div></header>%s'
+            '<div class="box ours"><h4>이 도구의 해설 <small>(공식 판정과 별개)</small></h4><p>%s</p><p>%s</p>'
+            '<p class="muted">평가 범위: %s / 변경 승인: %s</p></div>%s%s</article>') % (
+        sev, sev, esc(f['official_status']), esc(f['priority']), esc(f['category']),
+        badge(sev), esc(f['title']), meta, verdict, esc(f['recommendation']), esc(f['impact']),
+        esc(assessment_text(f)), esc(APPROVAL_KO[f['approval_required']]),
+        '<div class="box steps"><h4>조치·재확인 절차</h4><ol>%s</ol></div>' % steps if steps else '', evidence)
+
+
+HTML_CSS = '''
+:root{color-scheme:light dark;--bg:#f6f7f9;--card:#fff;--fg:#1b1f24;--muted:#57606a;--line:#d0d7de;--accent:#0b5cad;--bar:#e3e7ec;
+--error:#b42318;--error-bg:#fdecea;--warning:#8a5a00;--warning-bg:#fff3d1;--passed:#1a7f37;--passed-bg:#e7f5ea;--unknown:#57606a;--unknown-bg:#eceff2;
+--p1:#b42318;--p2:#c2410c;--p3:#8a5a00;--p4:#0b5cad;--pu:#57606a}
+@media (prefers-color-scheme:dark){:root{--bg:#0e1116;--card:#161b22;--fg:#e6edf3;--muted:#9da7b3;--line:#30363d;--accent:#58a6ff;--bar:#262c34;
+--error:#ff7b72;--error-bg:#3b1517;--warning:#e3b341;--warning-bg:#33280c;--passed:#56d364;--passed-bg:#10301a;--unknown:#9da7b3;--unknown-bg:#21262d;
+--p1:#ff7b72;--p2:#ffa657;--p3:#e3b341;--p4:#58a6ff;--pu:#9da7b3}}
+*{box-sizing:border-box}html{scroll-behavior:smooth;scroll-padding-top:12px}
+body{margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,"Segoe UI","Malgun Gothic","Apple SD Gothic Neo",sans-serif;line-height:1.55;overflow-wrap:anywhere}
+.skip{position:absolute;left:-999px}.skip:focus{left:8px;top:8px;background:var(--card);padding:8px;z-index:9}
+.top{padding:20px 24px 12px;border-bottom:1px solid var(--line);background:var(--card)}
+.top h1{margin:0 0 4px;font-size:24px}.meta{margin:0;color:var(--muted);font-size:13px}
+.layout{display:grid;grid-template-columns:210px minmax(0,1fr);gap:24px;max-width:1320px;margin:auto;padding:16px 24px 48px}
+.toc{position:sticky;top:12px;align-self:start;font-size:14px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px}
+.toc strong{display:block;margin-bottom:6px}.toc ol{list-style:none;margin:0;padding:0}.toc a{display:block;padding:5px 8px;border-radius:6px;color:var(--fg);text-decoration:none}
+.toc a:hover,.toc a:focus-visible{background:var(--bar)}
+main{min-width:0}section{margin:0 0 28px}h2{font-size:20px;margin:8px 0 12px;padding-bottom:6px;border-bottom:2px solid var(--line)}
+h3{font-size:16px;margin:0 0 8px}h4{font-size:14px;margin:0 0 6px}small,.muted,.note{color:var(--muted)}.note{font-size:13px;margin:8px 0 0}
+.conclusion{background:var(--card);border:1px solid var(--line);border-left:5px solid var(--accent);border-radius:8px;padding:12px 14px;margin:0 0 14px;font-weight:600}
+.panels{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.panel{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(78px,1fr));gap:8px}
+.tile{border-radius:8px;padding:8px 10px;background:var(--unknown-bg);border:1px solid var(--line)}
+.tile-k{font-size:13px;font-weight:600}.tile-v{font-size:26px;font-weight:700;line-height:1.2}.tile-s{font-size:12px;color:var(--muted)}
+.tone-error{background:var(--error-bg);color:var(--error)}.tone-warning{background:var(--warning-bg);color:var(--warning)}
+.tone-passed{background:var(--passed-bg);color:var(--passed)}.tone-unknown,.tone-info{background:var(--unknown-bg);color:var(--fg)}
+.tone-p1{color:var(--p1)}.tone-p2{color:var(--p2)}.tone-p3{color:var(--p3)}.tone-p4{color:var(--p4)}.tone-pu{color:var(--pu)}
+.prio .tile{background:var(--card)}
+.stack{display:flex;height:12px;border-radius:6px;overflow:hidden;margin-top:10px;background:var(--bar)}
+.seg.sev-error{background:var(--error)}.seg.sev-warning{background:var(--warning)}.seg.sev-passed{background:var(--passed)}.seg.sev-unknown{background:var(--unknown)}
+.badge{display:inline-flex;align-items:center;gap:4px;font-size:12px;font-weight:700;padding:2px 8px;border-radius:999px;border:1px solid currentColor;white-space:nowrap}
+.sev-error.badge,.badge.sev-error{color:var(--error);background:var(--error-bg)}.badge.sev-warning{color:var(--warning);background:var(--warning-bg)}
+.badge.sev-passed{color:var(--passed);background:var(--passed-bg)}.badge.sev-unknown{color:var(--unknown);background:var(--unknown-bg)}
+.chip{font-size:12px;padding:2px 8px;border-radius:6px;background:var(--bar)}.chips{display:flex;flex-wrap:wrap;gap:6px}
+.card{background:var(--card);border:1px solid var(--line);border-left:6px solid var(--unknown);border-radius:10px;padding:14px 16px;margin:0 0 14px}
+.card.sev-error{border-left-color:var(--error)}.card.sev-warning{border-left-color:var(--warning)}.card.sev-passed{border-left-color:var(--passed)}
+.card-h{display:flex;flex-wrap:wrap;align-items:center;gap:8px 10px;margin-bottom:10px}.card-h h3{margin:0;flex:1 1 260px}
+.box{border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin:8px 0}.box p{margin:4px 0}
+.box.official{background:var(--bar)}.box.own-verdict{border-style:dashed}.steps ol{margin:4px 0;padding-left:22px}
+details{margin:8px 0}summary{cursor:pointer;font-weight:600}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:var(--bar);padding:8px;border-radius:6px}
+.loc{font-size:12px;color:var(--muted);margin:6px 0 2px}
+.table-scroll{overflow-x:auto}table{border-collapse:collapse;font-size:14px}th,td{border:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top}
+th{background:var(--bar)}
+.filters{display:flex;flex-wrap:wrap;gap:10px;align-items:center;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin:0 0 14px}
+.filters[hidden]{display:none}.sevbtns{display:flex;flex-wrap:wrap;gap:6px}
+.sevbtns button{font:inherit;font-size:13px;padding:5px 10px;border-radius:999px;border:1px solid var(--line);background:var(--card);color:var(--fg);cursor:pointer}
+.sevbtns button[aria-pressed="true"]{background:var(--fg);color:var(--card);border-color:var(--fg)}
+label{display:flex;align-items:center;gap:6px;font-size:14px}input,select{font:inherit;padding:5px 8px;min-width:0;max-width:100%;background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:6px}
+#shown{font-size:13px;color:var(--muted)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.appendix>summary{font-size:18px;padding:8px 0}
+@media (max-width:860px){.layout{grid-template-columns:1fr;padding:12px}.panels{grid-template-columns:1fr}.toc{position:sticky;top:0;z-index:5;padding:6px 8px;min-width:0;max-width:100%}
+.toc strong{display:none}.toc ol{display:flex;gap:4px;overflow-x:auto;white-space:nowrap}}
+@media print{:root{color-scheme:light;--bg:#fff;--card:#fff;--fg:#000;--muted:#444;--line:#999;--bar:#eee}
+*{print-color-adjust:exact;-webkit-print-color-adjust:exact}.toc,.filters,.skip{display:none!important}.layout{display:block;padding:0}
+article[hidden]{display:block!important}details::details-content{content-visibility:visible!important;display:block!important}
+details>*{display:block}.card,.panel,.srv,tr{break-inside:avoid}a{color:inherit}}
+'''
+
+HTML_SCRIPT = '''<script>'use strict';(function(){
+const $=function(id){return document.getElementById(id);};const bar=$('filters');if(!bar)return;bar.hidden=false;
+const cards=Array.prototype.slice.call(document.querySelectorAll('article.card'));const buttons=Array.prototype.slice.call(bar.querySelectorAll('button[data-sev]'));let sev='';
+function apply(){const q=$('q').value.toLowerCase(),s=$('s').value,p=$('p').value,c=$('c').value;let shown=0;
+cards.forEach(function(a){const ok=a.textContent.toLowerCase().includes(q)&&(!s||a.dataset.status===s)&&(!p||a.dataset.priority===p)&&(!c||a.dataset.category===c)&&(!sev||a.dataset.sev===sev);a.hidden=!ok;if(ok)shown++;});
+$('shown').textContent=shown+'건 표시 / 전체 '+cards.length+'건';}
+buttons.forEach(function(b){b.addEventListener('click',function(){sev=b.dataset.sev;buttons.forEach(function(x){x.setAttribute('aria-pressed',String(x===b));});apply();});});
+$('q').addEventListener('input',apply);['s','p','c'].forEach(function(id){$(id).addEventListener('change',apply);});
+let reopen=[];window.addEventListener('beforeprint',function(){cards.forEach(function(a){a.hidden=false;});reopen=Array.prototype.slice.call(document.querySelectorAll('details:not([open])'));reopen.forEach(function(d){d.open=true;});});
+window.addEventListener('afterprint',function(){reopen.forEach(function(d){d.open=false;});reopen=[];apply();});apply();})();</script>'''
+
+R1_CATEGORIES = ('가용성', '설정', '보안', '미분류')
+
+
+def filters_html(cards_sev, status_options=(), categories=R1_CATEGORIES):
+    counts = Counter(cards_sev)
+    buttons = ['<button type="button" data-sev="" aria-pressed="true">전체 %d</button>' % len(cards_sev)]
+    for sev in ('error', 'warning', 'passed', 'unknown'):
+        if sev != 'unknown' or counts.get('unknown'):
+            icon, word = SEVERITY_UI[sev]
+            buttons.append('<button type="button" data-sev="%s" aria-pressed="false"><span aria-hidden="true">%s</span> %s %d</button>' % (sev, icon, word, counts.get(sev, 0)))
+    extra = ''.join('<option value="%s">%s</option>' % (esc(value), esc(text)) for value, text in status_options)
+    return ('<div class="filters" id="filters" hidden><div class="sevbtns" role="group" aria-label="심각도">%s</div>'
+            '<label>검색 <input id="q" type="search"></label>'
+            '<label>공식/자체 결과 <select id="s"><option value="">전체</option><option value="error">오류 (error)</option><option value="warning">경고 (warning)</option><option value="passed">통과 (passed)</option>%s</select></label>'
+            '<label>우선순위 <select id="p"><option value="">전체</option><option>P1</option><option>P2</option><option>P3</option><option>P4</option><option value="unclassified">미분류 (unclassified)</option></select></label>'
+            '<label>영역 <select id="c"><option value="">전체</option>%s</select></label><span id="shown" aria-live="polite"></span></div>') % (
+        ''.join(buttons), extra, ''.join('<option>%s</option>' % esc(c) for c in categories))
+
+
+def html_page(report, *, sections=(), dashboard_extra='', status_options=(), categories=R1_CATEGORIES, before_appendix=()):
+    """Single self-contained page: dashboard, optional visual sections, check cards, collapsed appendix."""
+    findings = sorted(report['findings'], key=lambda f: (SEVERITY_ORDER[severity(f)], PRIORITY_ORDER.get(f.get('priority'), 9)))
+    cards = ''.join(finding_card(f) for f in findings)
+    checks = ('<section id="checks" aria-labelledby="checks-h"><h2 id="checks-h">검사 결과 (오류·경고 우선)</h2>'
+              '<p class="note">공식 판정과 이 도구의 자체 점검은 별개입니다. 통과 상세는 복원하지 않습니다. 현재 서비스 상태의 실시간 검증이 아닙니다.</p>'
+              '%s%s</section>') % (filters_html([severity(f) for f in findings], status_options, categories),
+                                   cards or '<p>표시할 검사 상세가 없습니다.</p>')
+    appendix = ('<section id="appendix"><details class="appendix"><summary>부록: 확인된 정보·입력 결합·한계</summary>%s</details></section>'
+                % blocks_html(info_blocks(report)))
+    body = [('dashboard', '요약', dashboard_html(report, dashboard_extra))] + list(sections) + \
+           [('checks', '검사 결과', checks)] + list(before_appendix) + [('appendix', '부록', appendix)]
+    toc = ''.join('<li><a href="#%s">%s</a></li>' % (esc(sid), esc(title)) for sid, title, _ in body)
+    meta = '도구·스키마·정책: %s · 상태: %s' % (report['tool_version'] + ' / ' + report['schema_version'] + ' / ' + report['policy']['version'],
+                                          report['run_status'] + ' — ' + STATUS_KO.get(report['run_status'], ''))
+    return ('<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+            '<meta name="color-scheme" content="light dark">'
+            '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; style-src \'unsafe-inline\'; script-src \'unsafe-inline\'; base-uri \'none\'; form-action \'none\'">'
+            '<title>MinIO AIStor 진단 보고서</title><style>' + HTML_CSS + '</style></head><body>'
+            '<a class="skip" href="#main">본문으로 건너뛰기</a>'
+            '<header class="top"><h1>MinIO AIStor 폐쇄망 진단 보고서</h1><p class="meta">' + esc(meta) + '</p></header>'
+            '<div class="layout"><nav class="toc" aria-label="목차"><strong>목차</strong><ol>' + toc + '</ol></nav>'
+            '<main id="main">' + ''.join(html for _, _, html in body) + '</main></div>' + HTML_SCRIPT + '</body></html>')
+
+
 def html_report(report, extra_html=''):
-    articles = []
-    for f in report['findings']:
-        evidence = []
-        for block in f['evidence_blocks']:
-            evidence.append('<p>근거 구간: %s / 줄 %s</p>' % (esc(label(block['section'])), block['source_locator']['line']))
-            if block['type'] == 'table':
-                evidence.append(blocks_html([('table', block['headers'], block['rows'])]))
-            else:
-                evidence.append('<pre>%s</pre>' % esc(block['text']))
-        steps = ''.join('<li>%s</li>' % esc(step) for step in f['verification_steps'])
-        articles.append('<article data-status="%s" data-priority="%s" data-category="%s"><h2>%s</h2><p>공식: %s / 우선순위: %s / %s</p><p>%s</p><p>%s</p><p>%s</p><p>평가 범위: %s / 변경 승인: %s</p><ul>%s</ul><details><summary>마스킹된 근거</summary>%s</details></article>' %
-                        (*tuple(esc(x) for x in (f['official_status'], f['priority'], f['category'], f['title'], status_text(f),
-                                               priority_text(f['priority']), f['category'], f['observed'], f['recommendation'], f['impact'],
-                                               assessment_text(f), APPROVAL_KO[f['approval_required']])),
-                         steps, ''.join(evidence) or '<pre>%s</pre>' % esc(f['detail'])))
-    return '''<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
-<title>MinIO AIStor 진단 보고서</title><style>
-body{font-family:system-ui,sans-serif;max-width:1100px;margin:auto;padding:24px;overflow-wrap:anywhere}
-h1{font-size:28px}h2{font-size:20px}article{border:1px solid #bbb;border-radius:8px;padding:16px;margin:16px 0}
-pre{white-space:pre-wrap;overflow-wrap:anywhere}.filters{display:flex;flex-wrap:wrap;gap:12px}
-label{display:flex;align-items:center;gap:6px}input,select{padding:8px;min-width:0;max-width:100%%}
-summary{cursor:pointer}summary:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid #167d60}
-.table-scroll{overflow-x:auto}table{border-collapse:collapse}th,td{border:1px solid #bbb;padding:8px;text-align:left}
-@media(max-width:480px){body{padding:16px}h1{font-size:24px}}
-@media print{.filters{display:none}article{break-inside:avoid}}
-</style><h1>MinIO AIStor 폐쇄망 진단 보고서</h1><p>도구·스키마·정책: %s</p><p>상태: %s</p><p>%s</p>
-<p>통과 상세는 복원하지 않습니다. 현재 서비스 상태의 실시간 검증이 아닙니다.</p>
-<div class="filters"><label>검색 <input id="q" type="search"></label>
-<label>공식 상태 <select id="s"><option value="">전체</option><option value="error">오류 (error)</option><option value="warning">경고 (warning)</option><option value="passed">통과 (passed)</option></select></label>
-<label>우선순위 <select id="p"><option value="">전체</option><option>P1</option><option>P2</option><option>P3</option><option>P4</option><option value="unclassified">미분류 (unclassified)</option></select></label>
-<label>영역 <select id="c"><option value="">전체</option><option>가용성</option><option>설정</option><option>보안</option><option>미분류</option></select></label></div>
-%s%s%s
-<script>'use strict';function filter(){const q=document.getElementById('q').value.toLowerCase(),s=document.getElementById('s').value,p=document.getElementById('p').value,c=document.getElementById('c').value;document.querySelectorAll('article').forEach(a=>{a.hidden=!(a.textContent.toLowerCase().includes(q)&&(!s||a.dataset.status===s)&&(!p||a.dataset.priority===p)&&(!c||a.dataset.category===c));});}document.getElementById('q').addEventListener('input',filter);document.getElementById('s').addEventListener('change',filter);document.getElementById('p').addEventListener('change',filter);document.getElementById('c').addEventListener('change',filter);</script></html>''' % (
-        esc(report['tool_version'] + ' / ' + report['schema_version'] + ' / ' + report['policy']['version']),
-        esc(report['run_status'] + ' — ' + STATUS_KO.get(report['run_status'], '')), esc('공식 판정(mc 보고서) ' + summary_text(report['official_summary'])), ''.join(articles),
-        extra_html, blocks_html(info_blocks(report)))
+    sections = [('extra', '추가 정보', '<section id="extra">%s</section>' % extra_html)] if extra_html else []
+    return html_page(report, sections=sections)
 
 
 def require_private(path, directory=False):

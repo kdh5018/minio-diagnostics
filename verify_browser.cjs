@@ -57,8 +57,10 @@ async function main() {
     await page.locator('#q').focus();
     await page.keyboard.press('Tab');
     assert.equal(await page.locator('#s').evaluate(element => element === document.activeElement), true);
-    const disclosure = page.locator('details').first();
-    const hasDisclosure = (await disclosure.count()) > 0;
+    // 처음부터 접힌 details를 위치로 고정한다(열린 뒤 다른 요소로 바뀌지 않도록).
+    const closedIndex = await page.locator('details').evaluateAll(items => items.findIndex(item => !item.open));
+    const disclosure = page.locator('details').nth(Math.max(closedIndex, 0));
+    const hasDisclosure = closedIndex >= 0;
     if (hasDisclosure) {
       await disclosure.locator('summary').focus();
       await page.keyboard.press('Enter');
@@ -84,8 +86,38 @@ async function main() {
     await page.emulateMedia({ media: 'print' });
     assert.equal(await page.locator('.filters').isVisible(), false);
     assert.equal(await page.locator('article:visible').count(), report.findings.length);
-    await page.screenshot({ path: path.join(outputDirectory, 'print.png'), fullPage: false });
+    // 0.5.0: 인쇄 시 접힌 근거·부록이 모두 펼쳐져야 한다.
+    assert.equal(await page.locator('details > :not(summary):visible').count(), await page.locator('details > :not(summary)').count());
+    await page.screenshot({ path: path.join(outputDirectory, 'print.png'), fullPage: true });
     await page.emulateMedia({ media: 'screen' });
+    // 0.5.0: 심각도 버튼(전체/오류/경고/통과)은 data-sev 기준으로 카드를 거른다.
+    const severityCases = [];
+    for (const button of await page.locator('#filters button[data-sev]').all()) {
+      const sev = await button.getAttribute('data-sev');
+      await button.click();
+      const expected = await page.locator(sev ? `article[data-sev="${sev}"]` : 'article').count();
+      assert.equal(await page.locator('article:visible').count(), expected);
+      assert.equal(await button.getAttribute('aria-pressed'), 'true');
+      severityCases.push({ sev, expected });
+    }
+    await page.locator('#filters button[data-sev=""]').click();
+    for (const scheme of ['light', 'dark']) {
+      await page.emulateMedia({ colorScheme: scheme });
+      await page.screenshot({ path: path.join(outputDirectory, `full-${scheme}.png`), fullPage: true });
+    }
+    await page.emulateMedia({ colorScheme: 'light' });
+    // 0.5.0: JS를 꺼도 모든 카드·도식이 보이고, 동작하지 않는 필터는 숨겨진다. 인쇄도 CSS만으로 펼쳐진다.
+    const noJs = await browser.newContext({ viewport: { width: 1440, height: 1000 }, javaScriptEnabled: false });
+    const plain = await noJs.newPage();
+    await plain.goto(pathToFileURL(htmlPath).href, { waitUntil: 'load' });
+    assert.equal(await plain.locator('article:visible').count(), report.findings.length);
+    assert.equal(await plain.locator('#filters').isVisible(), false);
+    assert.equal(await plain.locator('#dashboard').isVisible(), true);
+    await plain.screenshot({ path: path.join(outputDirectory, 'nojs.png'), fullPage: true });
+    await plain.emulateMedia({ media: 'print' });
+    assert.equal(await plain.locator('details > :not(summary):visible').count(), await plain.locator('details > :not(summary)').count());
+    await plain.screenshot({ path: path.join(outputDirectory, 'nojs-print.png'), fullPage: true });
+    await noJs.close();
     await page.goto(pathToFileURL(hostileHtmlPath).href, { waitUntil: 'load' });
     assert.equal(await page.locator('img,iframe,object,embed').count(), 0);
     assert.equal(await page.evaluate(() => window.__aistorInjection === undefined), true);
@@ -96,7 +128,7 @@ async function main() {
     const result = {
       browser: browser.version(), protocol: 'file:', toolVersion: report.tool_version,
       inputGeneration: path.basename(path.dirname(htmlPath)), filters: cases,
-      search: 'passed', keyboardDisclosure: hasDisclosure ? 'passed' : 'not_applicable', printLayout: 'passed',
+      search: 'passed', severityButtons: severityCases, noJs: 'passed', printExpandsDetails: 'passed', keyboardDisclosure: hasDisclosure ? 'passed' : 'not_applicable', printLayout: 'passed',
       hostileMarkup: 'passed', desktop, mobile, externalRequests, pageErrors, consoleErrors,
       scope: 'Application-page requests only; not Chrome background services or every Markdown viewer.',
     };
@@ -109,6 +141,6 @@ async function main() {
 }
 
 main().catch(error => {
-  console.error(error.message);
+  console.error(error.stack || error.message);
   process.exitCode = 1;
 });

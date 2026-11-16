@@ -4,6 +4,7 @@ import copy
 import gzip
 import json
 import os
+import re
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -38,6 +39,10 @@ PAIRED_MD = '''# MinIO Health Diagnostics Report
 |---|---|
 | secret.internal:9000 | x |
 '''
+
+PREVIEW_MD = PAIRED_MD.replace('0 passed, 1 errors, 0 warnings', '32 passed, 1 error, 1 warning').replace(
+    '| secret.internal:9000 | x |',
+    '| secret.internal:9000 | x |\n| other.internal:9000 | x |\n| third.internal:9000 | x |')
 
 
 def packed(body, header=True):
@@ -689,6 +694,200 @@ class Fix044Tests(unittest.TestCase):
         rc, _, err = self.run_main(a.main, '--official-report', str(md), '--out-dir', str(md), '--force')
         self.assertEqual(rc, 3)
         self.assertIn('출력 폴더(--out-dir) 자체', err)
+
+
+def html_body(page):
+    """Markup outside the inline <style>/<script> blocks."""
+    return re.sub(r'<style>.*?</style>|<script>.*?</script>', '', page, flags=re.S)
+
+
+def preview_body():
+    """합성 3서버 × 2드라이브: offline 1개, 사용률 3구간, THP·IOMMU·rlimit 불일치, 수집 오류 3종."""
+    body = copy.deepcopy(SYNTHETIC)
+    hosts = ['secret.internal:9000', 'other.internal:9000', 'third.internal:9000']
+    servers = []
+    for i, host in enumerate(hosts):
+        server = copy.deepcopy(body['minio']['info']['servers'][0])
+        server['endpoint'] = host
+        server['drives'] = [dict(server['drives'][0], usedspace=u, availspace=100 - u, pool_index=0, set_index=0, disk_index=i * 2 + j)
+                            for j, u in enumerate(((10, 75), (95, 20), (30, 40))[i])]
+        servers.append(server)
+    servers[2]['drives'][1]['state'] = 'offline'
+    body['minio']['info']['servers'] = servers
+    thp = [{'enabled': 'always [madvise] never', 'defrag': '[madvise]', 'max_ptes_none': '0'},
+           {'enabled': '[always] madvise never', 'defrag': '[madvise]', 'max_ptes_none': '511'},
+           {'enabled': 'always [madvise] never', 'defrag': '[madvise]', 'max_ptes_none': '0'}]
+    body['sys']['config'] = [{'addr': host, 'config': {'proc-cmdline': ['intel_iommu=off' if i == 2 else 'intel_iommu=on'],
+                                                       'thp-config': thp[i], 'rlimit-max': 4096 if i == 1 else 1048576}}
+                             for i, host in enumerate(hosts)]
+    body['sys']['cpus'] = [{'error': 'open /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor: no such file or directory canary-cpu'}] * 3
+    body['sys']['netinfo'] = [{'error': 'Error getting ring parameters for canary-eth0: operation not supported'}] * 2 + [{}]
+    return body
+
+
+class Html050Tests(unittest.TestCase):
+    """0.5.0 도식 화면: 표시 계층만 바뀌고 판정·마스킹·Markdown은 그대로여야 한다."""
+
+    def setUp(self):
+        self.r = h.report(preview_body(), 1, PREVIEW_MD)
+        self.page = h.html_report(self.r)
+
+    def test_single_file_without_external_resources(self):
+        for page in (self.page, a.html_report(a.model(PAIRED_MD))):
+            body = html_body(page)
+            for needle in ('<link', '<img', '<iframe', '<object', '<embed', 'src=', '@import', 'url(', '@font-face', 'innerHTML'):
+                self.assertNotIn(needle, page)
+            self.assertNotRegex(body, r'href="(?!#)')  # 목차 앵커만 허용
+            self.assertIn("default-src 'none'", page)
+
+    def test_dashboard_tiles_and_cautious_conclusion(self):
+        page = self.page
+        self.assertIn('id="dashboard"', page)
+        self.assertIn('공식 판정(mc 보고서) 통과 32 · 오류 1 · 경고 1 (총 34)', page)
+        self.assertRegex(page, r'tile tone-passed"><div class="tile-k"><span aria-hidden="true">✔</span> 통과</div><div class="tile-v">32<')
+        conclusion = re.search(r'<p class="conclusion">(.*?)</p>', page).group(1)
+        self.assertIn('확인이 필요합니다', conclusion)
+        self.assertIn('현재 서비스 상태를 확정하지 않습니다', conclusion)
+        self.assertNotRegex(conclusion, r'정상(입니다|이다|으로 판정)')
+        for prio in ('P1', 'P2', 'P3', 'P4', '미분류'):
+            self.assertIn('<div class="tile-k">%s</div>' % prio, page)
+        clean = a.html_report(a.model(PAIRED_MD.replace('0 passed, 1 errors', '1 passed, 0 errors').replace('| error |', '| passed |').replace('(error)', '(passed)')))
+        conclusion = re.search(r'<p class="conclusion">(.*?)</p>', clean).group(1)
+        self.assertIn('보고된 오류·경고는 없습니다', conclusion)
+        self.assertIn('확정하지 않습니다', conclusion)
+
+    def test_drive_grid_shows_state_and_usage_with_text(self):
+        page = self.page
+        self.assertEqual(page.count('<li class="drv '), 6)
+        self.assertIn('<span aria-hidden="true">✖</span> offline', page)
+        self.assertIn('style="width:95.0%"', page)
+        self.assertIn('fill u-hi', page)
+        self.assertIn('fill u-mid', page)
+        self.assertIn('fill u-lo', page)
+        self.assertIn('사용 95.0%', page)
+        self.assertIn('표시용 구간이며 판정 아님', page)
+        self.assertNotIn('secret.internal', page)
+
+    def test_config_table_highlights_mismatches(self):
+        page = self.page
+        self.assertIn('<td class="c-bad"><span aria-hidden="true">✖</span> <strong>511</strong> <small>권장과 다름</small></td>', page)
+        self.assertIn('<td class="c-bad"><span aria-hidden="true">✖</span> <strong>always</strong> <small>권장과 다름</small></td>', page)
+        self.assertIn('<strong>intel_iommu=off</strong> <small>다른 서버와 다름</small>', page)
+        self.assertIn('<strong>4096</strong> <small>다른 서버와 다름</small>', page)
+        self.assertIn('권장값과 다른 칸 2개', page)
+
+    def test_collection_errors_chart_and_heatmap(self):
+        page = self.page
+        self.assertIn('✖ 오류 행 3 / 기록 3', page)
+        self.assertIn('✖ 오류 행 2 / 기록 3', page)
+        self.assertIn('<th scope="row">CPU 주파수 정책(cpufreq/scaling_governor)</th><td class="heat h4">3</td>', page)
+        self.assertIn('<table class="heatmap">', page)
+        self.assertNotIn('canary', page)
+
+    def test_cards_separate_official_and_own_commentary(self):
+        page = self.page
+        self.assertEqual(page.count('<article '), len(self.r['findings']))
+        self.assertIn('공식 판정 <small>(mc 보고서)</small>', page)
+        self.assertIn('자체 점검 판정 <small>(이 도구, 공식 판정 아님)</small>', page)
+        self.assertIn('이 도구의 해설 <small>(공식 판정과 별개)</small>', page)
+        sev = re.findall(r'<article class="card sev-(\w+)" data-sev="\1"', page)
+        self.assertEqual(len(sev), len(self.r['findings']))
+        order = {'error': 0, 'warning': 1, 'unknown': 2, 'passed': 3}
+        self.assertEqual([order[s] for s in sev], sorted(order[s] for s in sev))  # 오류·경고 우선
+
+    def test_works_without_js_and_expands_for_print(self):
+        page = self.page
+        self.assertIn('<div class="filters" id="filters" hidden>', page)  # JS가 없으면 동작하지 않는 필터는 숨김
+        for label in ('전체 ', '오류 ', '경고 ', '통과 '):
+            self.assertIn(label, re.search(r'<div class="sevbtns".*?</div>', page).group(0))
+        for section in ('dashboard', 'topology', 'config', 'collection', 'checks', 'raw', 'appendix'):
+            self.assertIn('<a href="#%s">' % section, page)
+            self.assertIn('id="%s"' % section, page)
+        self.assertIn('<details class="appendix"><summary>부록: 확인된 정보·입력 결합·한계</summary>', page)
+        self.assertIn('@media print', page)
+        self.assertIn('details::details-content{content-visibility:visible!important;display:block!important}', page)
+        self.assertIn('article[hidden]{display:block!important}', page)
+        self.assertIn("addEventListener('beforeprint'", page)
+        self.assertIn('@media (prefers-color-scheme:dark)', page)
+
+    def test_rendering_is_display_only(self):
+        before = copy.deepcopy(self.r)
+        md = h.markdown_report(self.r)
+        h.html_report(self.r)
+        self.assertEqual(self.r, before)
+        self.assertEqual(md, h.markdown_report(self.r))
+        for level in ('strict', 'basic'):
+            r = h.report(preview_body(), 1, PREVIEW_MD, mask=level)
+            page = h.html_report(r)
+            for leaked in ('secret.internal', 'other.internal', 'canary', '/private/data'):
+                self.assertNotIn(leaked, page)
+
+    def test_hostile_values_escaped_in_visual_sections(self):
+        r = copy.deepcopy(self.r)
+        n = r['facts']['health']
+        n['servers'][0]['version'] = '<script>alert(1)</script>'
+        n['drives'][0]['id'] = 'x-drive-<img src=x>'
+        n['system_configurations'][0]['rlimit_max'] = '<b>9</b>'
+        n['collection']['error_type_counts'] = {'<i>s</i> / <u>k</u>': 1}
+        page = h.html_report(r)
+        for raw in ('<script>alert', '<img', '<b>9', '<i>s', '<u>k'):
+            self.assertNotIn(raw, page)
+        self.assertIn('&lt;script&gt;alert(1)&lt;/script&gt;', page)
+
+
+def replay_md(results, checks):
+    """실제 수집본과 같은 형태(Summary 줄·검사 ID·상태)만 흉내 낸 합성 Markdown. 값은 모두 가짜."""
+    hosts = ['secret.internal:9000', 'other.internal:9000', 'third.internal:9000']
+    rows = ''.join('| %d | %s | %s | %s | Observed |\n' % (i + 1, s, cid, name) for i, (cid, name, s) in enumerate(checks))
+    info = '**Info:**\n| Server | Value |\n|---|---|\n' + ''.join('| %s | x |\n' % host for host in hosts)
+    details = ''.join('### %d. %s (%s)\n%s' % (i + 1, name, s, info) for i, (cid, name, s) in enumerate(checks))
+    return ('# MinIO Health Diagnostics Report\n## Summary\n* Date: Mon, 12 Oct 2026 08:56:49 UTC\n* Results: %s\n'
+            '## Errors\n| Index | Status | Check | Name | Description |\n|---|---|---|---|---|\n%s## Failed checks\n%s'
+            % (results, rows, details))
+
+
+class Replay050Tests(unittest.TestCase):
+    """0.5.0: 11/16(단수형 1 warning)·10/15 수집본 형태를 합성으로 재현해 결합 실행 결과를 고정한다."""
+    CASES = {
+        '1116': ('32 passed, 2 errors, 1 warning',
+                 [('minio.cluster.min', 'Cluster Size', 'error'), ('sys.mem.iommu', 'IOMMU', 'error'),
+                  ('sys.mem.thp', 'THP', 'warning')], (32, 2, 1)),
+        '1015': ('31 passed, 2 errors, 2 warnings',
+                 [('minio.cluster.min', 'Cluster Size', 'error'), ('sys.mem.iommu', 'IOMMU', 'error'),
+                  ('minio.net.tls.valid', 'TLS Certs Validity', 'warning'), ('sys.mem.thp', 'THP', 'warning')], (31, 2, 2)),
+    }
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        os.chmod(self.root, 0o700)
+        self.addCleanup(self._tmp.cleanup)
+
+    def test_combined_run_saves_partial_report_with_rc4(self):
+        import contextlib, io
+        gz = self.root / 'in.json.gz'
+        gz.write_bytes(packed(preview_body()))
+        for label, (line, checks, (p, e, w)) in self.CASES.items():
+            with self.subTest(case=label):
+                md, out = self.root / ('%s.md' % label), self.root / ('out-%s' % label)
+                md.write_text(replay_md(line, checks), encoding='utf-8')
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    rc = h.main(['--official-report', str(md), '--health', str(gz), '--out-dir', str(out), '--allow-partial'])
+                self.assertEqual(rc, 4, stderr.getvalue())  # 수집 오류가 있는 부분 분석
+                generation = json.loads((out / 'CURRENT.json').read_text())['generation']
+                saved = out / generation
+                report = json.loads((saved / 'aistor-diag-report.json').read_text())
+                self.assertEqual(report['run_status'], 'partial')
+                self.assertEqual(report['official_summary'], {'passed': p, 'errors': e, 'warnings': w})
+                self.assertEqual(report['input_link']['status'], 'consistent_observations')
+                self.assertEqual(sorted(c['source_check_id'] for c in report['check_results'] if c['origin'] != 'custom_rule'),
+                                 sorted(cid for cid, _, _ in checks))
+                page = (saved / 'aistor-diag-report.html').read_text(encoding='utf-8')
+                self.assertIn('공식 판정(mc 보고서) 통과 %d · 오류 %d · 경고 %d' % (p, e, w), page)
+                self.assertIn('통과 %d · 오류 %d · 경고 %d' % (p, e, w), (saved / 'aistor-diag-report.md').read_text(encoding='utf-8'))
+                self.assertNotIn('secret.internal', page)
 
 
 if __name__ == '__main__':
