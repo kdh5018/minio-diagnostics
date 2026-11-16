@@ -301,16 +301,31 @@ class ShellEntrypointTests(unittest.TestCase):
         p = self.run_sh(bundle, '--official-report', str(report), '--out-dir', 'rel out', cwd=self.base / 'in')
         self.assertIn('--out-dir=' + str(self.base / 'in/rel out'), self.stub_args())
 
-    def test_r1_r2_option_differences(self):
+    def write_gzip(self, rel, data=b'{}'):
+        import gzip
+        path = self.base / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(gzip.compress(data, mtime=0))
+        return path
+
+    def test_r1_r2_common_options(self):
+        # 0.4.0 의도된 변경: --lang/--fail-on-priority/--mask basic은 R2에도 그대로 전달된다(이전에는 rc 2 거부).
         bundle = self.make_bundle(runtime='stub')
         report = self.write_input('in/r.md')
-        health = self.write_input('in/h.json.gz', 'not used by stub')
-        for extra in (['--fail-on-priority', 'P1'], ['--lang', 'ko'], ['--mask', 'basic']):
+        health = self.write_gzip('in/h.json.gz')
+        for extra, expected in ((['--fail-on-priority', 'P1'], '--fail-on-priority=P1'), (['--lang', 'ko'], '--lang=ko'),
+                                (['--mask', 'basic'], '--mask=basic')):
             if self.args_log.exists():
                 self.args_log.unlink()
             p = self.run_sh(bundle, '--official-report', str(report), '--health', str(health), *extra)
-            self.assertEqual(p.returncode, 2, extra)
-            self.assertIsNone(self.stub_args(), extra)
+            self.assertEqual(p.returncode, 0, (extra, p.stderr))
+            self.assertIn(expected, self.stub_args())
+        for bad in (['--lang', 'en'], ['--fail-on-priority', 'P9'], ['--mask', 'none']):
+            if self.args_log.exists():
+                self.args_log.unlink()
+            p = self.run_sh(bundle, '--health', str(health), *bad)
+            self.assertEqual(p.returncode, 2, bad)
+            self.assertIsNone(self.stub_args(), bad)
         p = self.run_sh(bundle, '--official-report', str(report), '--health', str(health), '--as-of', '2026-10-12T00:00:00Z')
         self.assertEqual(p.returncode, 0, p.stderr)
         args = self.stub_args()
@@ -327,6 +342,76 @@ class ShellEntrypointTests(unittest.TestCase):
         self.assertEqual(self.run_sh(bundle, '--official-report').returncode, 2)
         self.assertEqual(self.run_sh(bundle, '--unknown', str(report)).returncode, 2)
         self.assertEqual(self.run_sh(bundle, '--official-report', str(report), '--fail-on-priority', 'P9').returncode, 2)
+
+    def test_help_is_korean_with_examples_and_html_guidance(self):
+        bundle = self.make_bundle(runtime='stub')
+        p = self.run_sh(bundle, '--help')
+        self.assertEqual(p.returncode, 0)
+        for text in ('사용법: run-report.sh', '예시:', '결과 보기:', '브라우저', 'R1·R2 공통', '종료 코드:'):
+            self.assertIn(text, p.stdout)
+        self.assertNotIn('R1 전용', p.stdout)
+
+    def test_typo_options_get_hint_without_running(self):
+        bundle = self.make_bundle(runtime='stub')
+        report = self.write_input('in/r.md')
+        for wrong, hint in (('--output-dir', '--out-dir'), ('-o', '--out-dir'), ('--report', '--official-report'),
+                            ('--gz', '--health'), ('--partial', '--allow-partial'), ('--output-dir=x', '--out-dir')):
+            if self.args_log.exists():
+                self.args_log.unlink()
+            p = self.run_sh(bundle, '--official-report', str(report), wrong)
+            self.assertEqual(p.returncode, 2, wrong)
+            self.assertIn('혹시 ' + hint, p.stderr, wrong)
+            self.assertIsNone(self.stub_args())
+        p = self.run_sh(bundle, str(report))
+        self.assertEqual(p.returncode, 2)
+        self.assertIn('--official-report <md>', p.stderr)
+
+    def test_input_kind_mismatch_and_permission_guidance(self):
+        bundle = self.make_bundle(runtime='stub')
+        report = self.write_input('in/r.md')
+        health = self.write_gzip('in/h.json.gz')
+        p = self.run_sh(bundle, '--health', str(report))
+        self.assertEqual(p.returncode, 2)
+        self.assertIn('gzip 파일이 아닙니다', p.stderr)
+        p = self.run_sh(bundle, '--official-report', str(health))
+        self.assertEqual(p.returncode, 2)
+        self.assertIn('gzip 파일을 지정했습니다', p.stderr)
+        self.assertIsNone(self.stub_args())
+        if os.geteuid() == 0:
+            self.skipTest('root bypasses read permission; permission guidance not testable as root')
+        locked = self.write_input('in/locked.md')
+        os.chmod(locked, 0o000)
+        try:
+            p = self.run_sh(bundle, '--official-report', str(locked))
+        finally:
+            os.chmod(locked, 0o600)
+        self.assertEqual(p.returncode, 2)
+        self.assertIn('읽을 권한이 없습니다', p.stderr)
+        self.assertIn('권한 0', p.stderr)
+        self.assertIn('소유자 계정으로 실행', p.stderr)
+        self.assertNotIn('chmod', p.stderr)
+        closed = self.base / 'closed dir'
+        closed.mkdir()
+        inner = self.write_input('closed dir/r.md')
+        os.chmod(closed, 0o600)
+        try:
+            p = self.run_sh(bundle, '--official-report', str(inner))
+        finally:
+            os.chmod(closed, 0o700)
+        self.assertEqual(p.returncode, 2)
+        self.assertIn('상위 디렉터리에 들어갈 권한이 없습니다', p.stderr)
+
+    def test_analyzer_input_error_details_reach_user(self):
+        bundle = self.make_bundle()
+        bad = self.write_input('in/bad.md', 'arbitrary markdown canary-secret')
+        p = self.run_sh(bundle, '--official-report', str(bad))
+        self.assertEqual(p.returncode, 2)
+        self.assertIn('Summary 줄', p.stderr)
+        self.assertNotIn('canary-secret', p.stderr + p.stdout)
+        report = self.write_input('in/r.md')
+        p = self.run_sh(bundle, '--official-report', str(report), '--as-of', '2026-10-12T00:00:00')
+        self.assertEqual(p.returncode, 2)
+        self.assertIn('시간대가 필요합니다', p.stderr)
 
     # -- 실행 환경 사전 점검 ---------------------------------------------------
     def test_unsupported_environment_refused_without_running(self):
@@ -468,15 +553,90 @@ class ReleasePackagingTests(unittest.TestCase):
                 (lic / name).write_text('fake license text for %s\n' % name, encoding='utf-8')
         return lic
 
-    def build(self, *extra, sha=None, licenses=None):
-        archive, digest = self.fake_runtime()
-        out = self.base / 'dist'
+    def build(self, *extra, sha=None, licenses=None, runtime=None, out=None, script=BUILD, target=('el8', 'x86_64'),
+              unverified=True):
+        archive, digest = runtime or self.fake_runtime()
+        out = out or self.base / 'dist'
         lic = licenses or self.fake_licenses()
-        cmd = [BASH, str(BUILD), '--os', 'el8', '--arch', 'x86_64', '--runtime-archive', str(archive),
+        cmd = [BASH, str(script), '--os', target[0], '--arch', target[1], '--runtime-archive', str(archive),
                '--runtime-sha256', sha or digest, '--license-dir', str(lic), '--allow-dirty', '--skip-runtime-exec',
                '--out-dir', str(out), *extra]
-        env = dict(os.environ, TMPDIR=str(self.base))
+        if unverified:
+            # 가짜 라이선스 원문은 고정 SHA-256과 다르므로 시험용 우회 옵션이 필요하다.
+            cmd.append('--allow-unverified-licenses')
+        env = dict(os.environ, TMPDIR=str(self.base), SOURCE_DATE_EPOCH='1791763200')
         return subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=300), out
+
+    def test_license_dir_checked_against_pinned_hashes(self):
+        p, out = self.build(unverified=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn('라이선스 원문 SHA-256이 고정 목록과 다릅니다', p.stderr)
+        self.assertIn('--allow-unverified-licenses', p.stderr)
+        self.assertFalse(list(out.glob('*.tar.gz')) if out.exists() else [])
+        p, out = self.build()
+        self.assertEqual(p.returncode, 0, p.stderr)
+        tarball = next(out.glob('*.tar.gz'))
+        with tarfile.open(tarball, 'r:gz') as tar:
+            info = tar.extractfile(tarball.name[:-len('.tar.gz')] + '/RELEASE-INFO').read().decode('utf-8')
+        self.assertIn('THIRD_PARTY_LICENSE_VERIFIED=no\n', info)
+        self.assertIn('UNVERIFIED', info)
+
+    def test_build_is_reproducible(self):
+        runtime = self.fake_runtime()
+        lic = self.fake_licenses()
+        first, out1 = self.build(runtime=runtime, licenses=lic, out=self.base / 'dist-a')
+        second, out2 = self.build(runtime=runtime, licenses=lic, out=self.base / 'dist-b')
+        self.assertEqual((first.returncode, second.returncode), (0, 0), first.stderr + second.stderr)
+        a_tar, b_tar = next(out1.glob('*.tar.gz')), next(out2.glob('*.tar.gz'))
+        self.assertEqual(a_tar.name, b_tar.name)
+        self.assertEqual(a_tar.read_bytes(), b_tar.read_bytes())
+
+    def test_add_target_is_one_table_row(self):
+        # 대상 추가는 표 한 줄(+새 full 배포판이면 대조 목록)만으로 끝나야 한다. 실제 다른 OS·CPU 빌드는 아님.
+        copy = self.base / 'src-copy'
+        copy.mkdir()
+        for name in APP_FILES + ('run-report.sh', 'LICENSE', 'build-release.sh'):
+            shutil.copy2(ROOT / name, copy / name)
+        lic = self.fake_licenses()
+        manifest = ''
+        archive_args = ['--license-dir', str(lic)]
+        full_sha = '-'
+        if sys.version_info >= (3, 14):
+            from compression import zstd
+            full = self.base / 'fake-full.tar.zst'
+            with zstd.open(full, 'wb') as raw, tarfile.open(fileobj=raw, mode='w|') as tar:
+                for f in sorted(lic.iterdir()):
+                    tar.add(f, arcname='python/licenses/' + f.name)
+            full_sha = hashlib.sha256(full.read_bytes()).hexdigest()
+            manifest = ''.join('%s %s  %s\n' % (full_sha, hashlib.sha256(f.read_bytes()).hexdigest(), f.name)
+                               for f in sorted(lic.iterdir()))
+            archive_args = ['--license-archive', str(full)]
+        runtime = self.fake_runtime()
+        script = (copy / 'build-release.sh').read_text(encoding='utf-8')
+        row = 'el9test-x86_64|시험 대상(x86_64)|rocky|9|2.34|x86_64-unknown-linux-gnu|%s|%s\n' % (runtime[1], full_sha)
+        self.assertEqual(script.count("TARGET_TABLE='\n"), 1)
+        script = script.replace("TARGET_TABLE='\n", "TARGET_TABLE='\n" + row)
+        script = script.replace("LICENSE_MANIFEST='\n", "LICENSE_MANIFEST='\n" + manifest)
+        (copy / 'build-release.sh').write_text(script, encoding='utf-8')
+        listed = subprocess.run([BASH, str(copy / 'build-release.sh'), '--list-targets'], capture_output=True, text=True, timeout=60)
+        self.assertIn('el8-x86_64', listed.stdout)
+        self.assertIn('el9test-x86_64', listed.stdout)
+        out = self.base / 'dist-new'
+        cmd = [BASH, str(copy / 'build-release.sh'), '--os', 'el9test', '--arch', 'x86_64', '--runtime-archive', str(runtime[0]),
+               '--allow-dirty', '--skip-runtime-exec', '--out-dir', str(out), *archive_args]
+        if not manifest:
+            cmd.append('--allow-unverified-licenses')
+        p = subprocess.run(cmd, capture_output=True, text=True, env=dict(os.environ, TMPDIR=str(self.base)), timeout=300)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        tarball = next(out.glob('*.tar.gz'))
+        self.assertTrue(tarball.name.endswith('-el9test-x86_64.tar.gz'))
+        verify_release_tarball(self, tarball, fake_runtime=True)
+        with tarfile.open(tarball, 'r:gz') as tar:
+            info = tar.extractfile(tarball.name[:-len('.tar.gz')] + '/RELEASE-INFO').read().decode('utf-8')
+        self.assertIn('TARGET_OS_MAJORS=9\n', info)
+        self.assertIn('MIN_GLIBC=2.34\n', info)
+        if manifest:
+            self.assertIn('THIRD_PARTY_LICENSE_VERIFIED=yes\n', info)
 
     def test_build_bundle_contents_and_forbidden_items(self):
         p, out = self.build()
@@ -590,7 +750,8 @@ def verify_release_tarball(test, tarball, fake_runtime=False):
             test.assertEqual(hashlib.sha256(tar.extractfile(m).read()).hexdigest(), listed[path], path)
         info = tar.extractfile(top + '/RELEASE-INFO').read().decode('utf-8')
         for key in ('TARGET_ARCH=', 'TARGET_OS_IDS=', 'TARGET_OS_MAJORS=', 'MIN_GLIBC=', 'PYTHON_VERSION=',
-                    'SOURCE_COMMIT=', 'LICENSE_STATUS=proprietary\n', 'THIRD_PARTY_LICENSE_SOURCE='):
+                    'SOURCE_COMMIT=', 'LICENSE_STATUS=proprietary\n', 'THIRD_PARTY_LICENSE_SOURCE=',
+                    'THIRD_PARTY_LICENSE_VERIFIED='):
             test.assertIn(key, info)
         test.assertNotIn('pending', info)
         test.assertEqual(tar.extractfile(top + '/LICENSE').read(), (ROOT / 'LICENSE').read_bytes())
@@ -605,6 +766,7 @@ def verify_release_tarball(test, tarball, fake_runtime=False):
             test.assertIn('runtime/python/lib/libpython3.12.so.1.0', rel)
             # Real artifacts must take third-party notices from the pinned full archive, verbatim.
             test.assertIn('sha256=', info.split('THIRD_PARTY_LICENSE_SOURCE=', 1)[1].splitlines()[0])
+            test.assertIn('THIRD_PARTY_LICENSE_VERIFIED=yes\n', info)
             openssl = tar.extractfile(top + '/licenses/third-party/LICENSE.openssl-3.txt').read().decode('utf-8')
             test.assertIn('Apache License', openssl)
 

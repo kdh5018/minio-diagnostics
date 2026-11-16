@@ -23,6 +23,23 @@ SYNTHETIC = {'version': '3', 'timestamp': '2026-10-12T08:56:45Z', 'minio': {'inf
     'tls': {'tls_enabled': True, 'certs': [{'not_before': '2026-01-01T00:00:00Z', 'not_after': '2027-01-01T00:00:00Z', 'subject': 'canary-subject'}]}}}, 'sys': {'config': [{'addr': 'secret.internal:9000', 'config': {'proc-cmdline': ['intel_iommu=on'], 'thp-config': {'enabled': 'always madvise [never]'}}}], 'errors': [{'addr': 'secret.internal:9000'}]}}
 
 
+PAIRED_MD = '''# MinIO Health Diagnostics Report
+## Summary
+* Date: Mon, 12 Oct 2026 08:56:49 UTC
+* Results: 0 passed, 1 errors, 0 warnings
+## Errors
+| Index | Status | Check | Name | Description |
+|---|---|---|---|---|
+| 1 | error | unknown.check | Unknown check | Observed fact |
+## Failed checks
+### 1. Unknown check (error)
+**Info:**
+| Server | Value |
+|---|---|
+| secret.internal:9000 | x |
+'''
+
+
 def packed(body, header=True):
     text = (json.dumps({'version': '3'}) + '\n' if header else '') + json.dumps(body)
     return gzip.compress(text.encode())
@@ -307,6 +324,161 @@ class R2Tests(unittest.TestCase):
         self.assertEqual(collection['sections']['cpus']['reported_errors'], 3)
         self.assertEqual(collection['sections']['netinfo']['reported_errors'], 3)
         self.assertIn('오류가 기록된 행 수: <strong>6</strong>', h.html_report(report))
+
+    # -- 0.4.0 개선 회귀 테스트 ------------------------------------------------
+    def workdir(self):
+        import tempfile
+        parent = a.secure_dir(a.DEFAULT_OUTPUT_DIR / 'test-artifacts')
+        return Path(tempfile.mkdtemp(prefix='r2-040-', dir=parent))
+
+    def run_main(self, *argv):
+        import contextlib, io
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = h.main(list(argv))
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_markdown_and_html_have_no_internal_structures(self):
+        body = copy.deepcopy(SYNTHETIC)
+        body['sys']['cpus'] = [{'error': 'open /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor: no such file or directory canary-cpu'}]
+        r = h.report(body, 1, PAIRED_MD)
+        md, rendered = h.markdown_report(r), h.html_report(r)
+        for text in (md, rendered):
+            self.assertNotIn("{'", text)
+            self.assertNotIn('{&quot;', text)
+            self.assertNotIn('{&#x27;', text)
+            self.assertNotIn('canary', text)
+            self.assertNotIn('secret.internal', text)
+            self.assertIn('통과 0 · 오류 1 · 경고 0 (총 1)', text)
+            self.assertIn('원본 관측 정보', text)
+            self.assertIn('입력 결합 확인', text)
+            self.assertIn('자체 점검 결과', text)
+        self.assertNotIn('<pre>{', rendered)
+        self.assertIn('| 항목 | 값 |', md)
+        self.assertIn('| 수집 영역 | 제공 기록 수 | 오류 기록 행 수 | 입력 지원 상태 | 원본 JSON 위치 |', md)
+        r1 = a.markdown(a.model(PAIRED_MD))
+        self.assertIn('## 한계', r1)
+        self.assertIn('| 범위 | 상태 |', r1)
+        self.assertNotIn("{'", r1)
+
+    def test_thp_compared_with_official_recommendation(self):
+        def thp(**values):
+            body = copy.deepcopy(SYNTHETIC)
+            body['sys']['config'][0]['config']['thp-config'] = values
+            return next(c for c in h.report(body)['check_results'] if c['rule_id'] == 'r2.thp.mode')
+        ok = thp(enabled='always [madvise] never', defrag='always defer [defer+madvise] madvise never', max_ptes_none='0')
+        self.assertEqual(ok['rule_result'], 'pass')
+        self.assertEqual(ok['rule_version'], 'r2-system-2')
+        self.assertIn('공식 sys.mem.thp', ok['condition'])
+        self.assertIsNone(ok['official_status'])
+        self.assertEqual(thp(enabled='always [madvise] never', defrag='[madvise]', max_ptes_none='511')['rule_result'], 'warning')
+        self.assertEqual(thp(enabled='[never]', defrag='[madvise]', max_ptes_none='0')['rule_result'], 'warning')
+        self.assertEqual(thp(enabled='[always] madvise never')['rule_result'], 'warning')
+        missing = thp(enabled='always [madvise] never')
+        self.assertIsNone(missing['rule_result'])
+        self.assertEqual(missing['assessment'], 'insufficient_data')
+
+    def test_collection_error_types_fixed_labels_only(self):
+        body = copy.deepcopy(SYNTHETIC)
+        body['sys']['cpus'] = [{'error': 'open /sys/devices/system/cpu/cpu%d/cpufreq/scaling_governor: no such file or directory' % i} for i in range(3)]
+        body['sys']['netinfo'] = [{'error': 'Error getting ring parameters for canary-eth0: operation not supported'} for _ in range(3)]
+        body['sys']['partitions'] = [{'error': 'canary-host-secret permission denied'}, {'errors': ['weird canary']}]
+        r = h.report(body)
+        types = r['facts']['health']['collection']['error_type_counts']
+        self.assertEqual(types, {'CPU 주파수 정책(cpufreq/scaling_governor) / 파일 없음': 3, 'NIC ring 파라미터 / 미지원': 3,
+                                 '미분류 대상 / 권한 거부': 1, '미분류 대상 / 기타': 1})
+        dumped = json.dumps(r, ensure_ascii=False) + h.html_report(r) + h.markdown_report(r)
+        for leaked in ('canary', '/sys/devices', 'scaling_governor:'):
+            self.assertNotIn(leaked, dumped)
+        self.assertIn('원인 확정 아님', h.html_report(r))
+
+    def test_sys_errors_missing_reports_lower_bound_not_zero(self):
+        body = copy.deepcopy(SYNTHETIC)
+        del body['sys']['errors']
+        body['sys']['cpus'] = [{'error': 'x'}, {'error': 'y'}, 'not-a-record']
+        r = h.report(body)
+        collection = r['facts']['health']['collection']
+        self.assertIsNone(collection['reported_error_count'])
+        self.assertEqual(collection['observed_error_rows'], 2)
+        self.assertEqual(collection['count_basis'], 'lower_bound')
+        self.assertEqual(collection['incomplete_reasons'], ['sys_errors_missing_or_not_list', 'malformed_records:cpus'])
+        rule = next(c for c in r['check_results'] if c['rule_id'] == 'r2.collection.errors')
+        self.assertEqual((rule['rule_result'], rule['reason']), ('warning', 'lower_bound_error_rows_observed'))
+        self.assertEqual(r['run_status'], 'partial')
+        self.assertIn('collection error count incomplete', r['parser_errors'])
+        self.assertIn('오류가 기록된 행 수: <strong>최소 2 (전체 수 미확정)</strong>', h.observations_html(r))
+        body['sys']['errors'] = 'broken'
+        body['sys']['cpus'] = []
+        r = h.report(body)
+        self.assertIsNone(next(c for c in r['check_results'] if c['rule_id'] == 'r2.collection.errors')['rule_result'])
+        self.assertIn('오류가 기록된 행 수: <strong>미제공 / 미평가</strong>', h.observations_html(r))
+
+    def test_common_options_mask_lang_fail_on_priority(self):
+        work = self.workdir()
+        health = work / 'h.json.gz'
+        health.write_bytes(packed(SYNTHETIC))
+        rc, out, err = self.run_main('--health', str(health), '--out-dir', str(work / 'o1'), '--lang', 'ko', '--mask', 'basic', '--fail-on-priority', 'P2')
+        self.assertEqual(rc, 1, err)
+        self.assertIn('요약: 공식 판정 공식 Markdown 미지정', out)
+        current = json.loads((work / 'o1/CURRENT.json').read_text())
+        saved = json.loads((work / 'o1' / current['generation'] / 'aistor-diag-report.json').read_text())
+        self.assertEqual(saved['masking']['level'], 'basic')
+        self.assertEqual(saved['schema_version'], h.SCHEMA_VERSION)
+        rc, _, err = self.run_main('--health', str(health), '--out-dir', str(work / 'o2'), '--fail-on-priority', 'P1')
+        self.assertEqual(rc, 0, err)
+        body = copy.deepcopy(SYNTHETIC)
+        del body['sys']['errors']
+        health.write_bytes(packed(body))
+        rc, _, _ = self.run_main('--health', str(health), '--out-dir', str(work / 'o3'), '--allow-partial', '--fail-on-priority', 'P2')
+        self.assertEqual(rc, 4)
+
+    def test_time_conflict_message_is_specific_and_safe(self):
+        work = self.workdir()
+        body = copy.deepcopy(SYNTHETIC)
+        body['timestamp'] = '2026-10-12T08:54:08Z'
+        (work / 'h.json.gz').write_bytes(packed(body))
+        (work / 'r.md').write_text(PAIRED_MD, encoding='utf-8')
+        rc, out, err = self.run_main('--health', str(work / 'h.json.gz'), '--official-report', str(work / 'r.md'), '--out-dir', str(work / 'o'))
+        self.assertEqual(rc, 2)
+        self.assertIn('161초', err)
+        self.assertIn('허용 120초', err)
+        self.assertIn('생성 시각', err)
+        self.assertIn('따로 분석', err)
+        self.assertNotIn('secret.internal', err + out)
+        self.assertFalse((work / 'o').exists())
+        body['timestamp'] = '2026-10-12T08:54:48Z'  # 121초: 거부
+        with self.assertRaises(a.InputError):
+            h.report(body, 1, PAIRED_MD)
+        body['timestamp'] = '2026-10-12T08:54:49Z'  # 정확히 120초: 허용
+        self.assertEqual(h.report(body, 1, PAIRED_MD)['input_link']['status'], 'consistent_observations')
+
+    def test_target_conflict_message_counts_only(self):
+        work = self.workdir()
+        (work / 'h.json.gz').write_bytes(packed(SYNTHETIC))
+        (work / 'r.md').write_text(PAIRED_MD.replace('secret.internal:9000', 'other.internal:9000'), encoding='utf-8')
+        rc, out, err = self.run_main('--health', str(work / 'h.json.gz'), '--official-report', str(work / 'r.md'), '--out-dir', str(work / 'o'))
+        self.assertEqual(rc, 2)
+        self.assertIn('서버 대상 불일치: Markdown 1개 / gzip 1개 / 공통 0개', err)
+        self.assertNotIn('other.internal', err + out)
+        self.assertNotIn('secret.internal', err + out)
+
+    def test_input_error_guidance_without_raw_text(self):
+        work = self.workdir()
+        bad = work / 'not-gzip.md'
+        bad.write_text('canary-secret', encoding='utf-8')
+        rc, _, err = self.run_main('--health', str(bad), '--out-dir', str(work / 'o'))
+        self.assertEqual(rc, 2)
+        self.assertIn('원본 gzip(--health)', err)
+        self.assertIn('gzip 파일이 아니거나', err)
+        self.assertNotIn('canary-secret', err)
+        rc, _, err = self.run_main('--health', str(work / 'missing.gz'), '--out-dir', str(work / 'o'))
+        self.assertEqual(rc, 2)
+        self.assertIn('파일이 없습니다', err)
+        self.assertNotIn('missing.gz', err)
+        lines = a.describe_input_error(PermissionError(13, 'Permission denied: /secret/canary'), 'X')
+        self.assertIn('읽을 권한이 없습니다', lines[0])
+        self.assertNotIn('canary', ' '.join(lines))
+        self.assertNotIn('chmod', ' '.join(lines))
 
     def test_no_network_or_shell_imports(self):
         tree = ast.parse(Path(h.__file__).read_text())
