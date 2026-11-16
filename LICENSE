@@ -1,0 +1,15 @@
+Copyright (c) 2026 WNYTech. All rights reserved.
+
+This software is proprietary to WNYTech. It may be used only within WNYTech
+and by customers to whom WNYTech has provided it, for the purpose for which it
+was provided. Copying or distributing this software, in whole or in part, for
+any other purpose without the prior written permission of WNYTech is
+prohibited.
+
+이 소프트웨어의 저작권은 WNYTech에 있습니다. WNYTech 사내 및 WNYTech가 제공한
+고객사에서 제공 목적으로만 사용할 수 있으며, 그 목적 외의 무단 복제·배포를
+금지합니다.
+
+Third-party components included in release packages (such as the bundled
+Python runtime) remain under their own licenses; see the licenses/ directory
+of the release package.

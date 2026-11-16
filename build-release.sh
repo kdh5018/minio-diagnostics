@@ -6,21 +6,30 @@
 # - 분석기 소스(analyze.py 등)와 run-report.sh, 대상별 Python 런타임을 묶는다.
 # - 런타임은 python-build-standalone(install_only_stripped)을 사용하고 SHA-256을 고정한다.
 #   인터넷이 없는 빌드 환경에서는 --runtime-archive로 미리 받은 파일을 지정한다.
+# - 런타임 제3자 라이선스 원문은 같은 릴리스의 full 배포판(python/licenses/)에서 가져온다.
+#   stripped 배포판에는 CPython 라이선스만 들어 있기 때문이다. SHA-256을 고정하며,
+#   미리 받은 파일은 --license-archive, 이미 풀어 둔 폴더는 --license-dir로 지정한다.
 # - 고객·테스트 서버에서 실행하는 스크립트가 아니다. 서버에는 결과 tar.gz만 반입한다.
 # - 진단 원본·보고서·.git·인증정보·테스트 잔여물·백업·내부 계약서는 포함하지 않으며,
 #   묶기 전에 금지 목록 검사를 다시 수행한다.
 #
 # 대상 추가 방법: target_config()에 "<os>-<arch>)" 블록 하나를 추가한다.
-#   필요한 값은 런타임 triple, 해당 런타임 파일의 SHA-256, 지원 OS ID·주 버전, 최소 glibc다.
+#   필요한 값은 런타임 triple, 해당 런타임 파일과 full 배포판의 SHA-256,
+#   지원 OS ID·주 버전, 최소 glibc다.
 
 set -euo pipefail
 umask 022
 
 readonly PACKAGE_NAME=aistor-diag-analyzer
-readonly PACKAGE_VERSION=0.3.0
+readonly PACKAGE_VERSION=0.3.1
 readonly PBS_RELEASE=20261110
 readonly PBS_PYTHON=3.12.16
 readonly APP_FILES=(analyze.py aistordoctor.py r2_health.py r2_enrichment.py)
+# 배포물에 반드시 들어가야 하는 런타임 제3자 라이선스 원문(full 배포판 python/licenses/).
+readonly REQUIRED_RUNTIME_LICENSES=(LICENSE.cpython.txt LICENSE.openssl-3.txt LICENSE.zlib.txt
+    LICENSE.libffi.txt LICENSE.sqlite.txt LICENSE.expat.txt LICENSE.bzip2.txt LICENSE.liblzma.txt
+    LICENSE.mpdecimal.txt)
+readonly LICENSE_STATUS_VALUE=proprietary
 
 ROOT=$(cd -P -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" && pwd -P)
 
@@ -37,6 +46,8 @@ usage() {
   --cache-dir <디렉터리>    런타임 내려받기 캐시(기본: ./.cache/runtime)
   --runtime-archive <파일>  미리 받은 런타임 파일 사용(내려받지 않음)
   --runtime-sha256 <값>     런타임 파일 SHA-256 재지정(시험용; 기본은 대상별 고정값)
+  --license-archive <파일>  미리 받은 full 배포판(.tar.zst)에서 제3자 라이선스 원문 추출
+  --license-dir <디렉터리>  이미 풀어 둔 python/licenses 폴더 사용(SHA 미검증으로 기록)
   --allow-dirty             커밋되지 않은 분석기 변경이 있어도 빌드(배포 정보에 dirty 기록)
   --skip-runtime-exec       빌드 환경에서 런타임 실행 점검 생략(다른 CPU 대상 빌드용)
   --list-targets            지원 대상 목록
@@ -60,22 +71,28 @@ target_config() {
             MIN_GLIBC=2.28
             PBS_TRIPLE=x86_64-unknown-linux-gnu
             RUNTIME_SHA256_PINNED=6a9e62dad033790aef722dbd370e0ce76ce17b73627ba3ae679f537049350b39
+            # 같은 빌드의 full 배포판(라이선스 원문 출처). install_only_stripped는 이 빌드에서 파생된다.
+            LICENSE_SHA256_PINNED=a1b98760371cfd145a1533ea75c89437cdaf538e84c5e84c469eda9065a251af
             ;;
         # 예시(미검증·미빌드). 요청이 오면 SHA-256을 확인해 채우고 실제 환경에서 검증한다.
         # el8-aarch64)
         #     TARGET_DESC="RHEL·Rocky Linux·AlmaLinux 8/9/10 (aarch64)"
         #     TARGET_OS_IDS="rhel rocky almalinux"; TARGET_OS_MAJORS="8 9 10"; MIN_GLIBC=2.28
-        #     PBS_TRIPLE=aarch64-unknown-linux-gnu; RUNTIME_SHA256_PINNED=<확인 필요> ;;
+        #     PBS_TRIPLE=aarch64-unknown-linux-gnu; RUNTIME_SHA256_PINNED=<확인 필요>
+        #     LICENSE_SHA256_PINNED=<확인 필요> ;;
         # ubuntu22-x86_64)
         #     TARGET_DESC="Ubuntu 22.04/24.04 (x86_64)"
         #     TARGET_OS_IDS="ubuntu"; TARGET_OS_MAJORS="22 24"; MIN_GLIBC=2.35
-        #     PBS_TRIPLE=x86_64-unknown-linux-gnu; RUNTIME_SHA256_PINNED=6a9e62da... ;;
+        #     PBS_TRIPLE=x86_64-unknown-linux-gnu; RUNTIME_SHA256_PINNED=6a9e62da...
+        #     LICENSE_SHA256_PINNED=a1b98760... ;;
         *)
             die "지원하지 않는 대상입니다: $TARGET_ID (가능: $KNOWN_TARGETS)"
             ;;
     esac
     RUNTIME_FILE=cpython-${PBS_PYTHON}+${PBS_RELEASE}-${PBS_TRIPLE}-install_only_stripped.tar.gz
     RUNTIME_URL=https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_RELEASE}/${RUNTIME_FILE//+/%2B}
+    LICENSE_FILE=cpython-${PBS_PYTHON}+${PBS_RELEASE}-${PBS_TRIPLE}-pgo+lto-full.tar.zst
+    LICENSE_URL=https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_RELEASE}/${LICENSE_FILE//+/%2B}
 }
 
 # ---------------------------------------------------------------- 금지 항목 검사
@@ -124,6 +141,8 @@ OUT_DIR=$ROOT/dist
 CACHE_DIR=$ROOT/.cache/runtime
 RUNTIME_ARCHIVE=
 RUNTIME_SHA256_OVERRIDE=
+LICENSE_ARCHIVE=
+LICENSE_DIR=
 ALLOW_DIRTY=0
 SKIP_RUNTIME_EXEC=0
 
@@ -135,6 +154,8 @@ while [ $# -gt 0 ]; do
         --cache-dir) CACHE_DIR=${2:?}; shift 2 ;;
         --runtime-archive) RUNTIME_ARCHIVE=${2:?}; shift 2 ;;
         --runtime-sha256) RUNTIME_SHA256_OVERRIDE=${2:?}; shift 2 ;;
+        --license-archive) LICENSE_ARCHIVE=${2:?}; shift 2 ;;
+        --license-dir) LICENSE_DIR=${2:?}; shift 2 ;;
         --allow-dirty) ALLOW_DIRTY=1; shift ;;
         --skip-runtime-exec) SKIP_RUNTIME_EXEC=1; shift ;;
         --list-targets) printf '%s\n' $KNOWN_TARGETS; exit 0 ;;
@@ -161,11 +182,11 @@ if command -v git >/dev/null 2>&1 && git -C "$ROOT" rev-parse --git-dir >/dev/nu
     SOURCE_COMMIT=$(git -C "$ROOT" rev-parse HEAD)
     SOURCE_EPOCH=$(git -C "$ROOT" log -1 --format=%ct HEAD)
     SOURCE_DIRTY=no
-    for f in "${APP_FILES[@]}" run-report.sh; do
+    for f in "${APP_FILES[@]}" run-report.sh LICENSE; do
         # 추적되지 않는(허용 목록 누락 포함) 파일도 커밋되지 않은 변경으로 본다.
         git -C "$ROOT" ls-files --error-unmatch -- "$f" >/dev/null 2>&1 || SOURCE_DIRTY=yes
     done
-    if [ -n "$(git -C "$ROOT" status --porcelain -- "${APP_FILES[@]}" run-report.sh)" ]; then
+    if [ -n "$(git -C "$ROOT" status --porcelain -- "${APP_FILES[@]}" run-report.sh LICENSE)" ]; then
         SOURCE_DIRTY=yes
     fi
 fi
@@ -204,12 +225,75 @@ actual=$(sha256sum -- "$RUNTIME_ARCHIVE" | cut -d' ' -f1)
 [ "$actual" = "$RUNTIME_SHA256" ] || die "런타임 SHA-256 불일치: $actual (기대 $RUNTIME_SHA256)"
 echo "런타임 확인: $(basename -- "$RUNTIME_ARCHIVE") sha256=$actual"
 
+[ -f "$ROOT/LICENSE" ] || die "저장소 최상위 LICENSE 파일이 없습니다."
+
+# ---------------------------------------------------------------- 제3자 라이선스 원문 확보
+fetch() {  # fetch <url> <파일>
+    local tmp=$2.part
+    echo "내려받기(개발 환경): $1"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fL --retry 3 -o "$tmp" "$1"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -O "$tmp" "$1"
+    else
+        die "curl·wget이 없습니다. 미리 받은 파일을 옵션으로 지정하십시오."
+    fi
+    mv -f -- "$tmp" "$2"
+}
+LICENSE_WORK=$(mktemp -d "${TMPDIR:-/tmp}/aistor-lic.XXXXXX")
+trap 'rm -rf -- "$LICENSE_WORK"' EXIT
+if [ -n "$LICENSE_DIR" ]; then
+    [ -d "$LICENSE_DIR" ] || die "--license-dir 디렉터리가 없습니다: $LICENSE_DIR"
+    LICENSE_SRC=$LICENSE_DIR
+    LICENSE_ORIGIN="directory (archive SHA-256 not verified)"
+else
+    if [ -z "$LICENSE_ARCHIVE" ]; then
+        mkdir -p -- "$CACHE_DIR"
+        LICENSE_ARCHIVE=$CACHE_DIR/$LICENSE_FILE
+        [ -f "$LICENSE_ARCHIVE" ] || fetch "$LICENSE_URL" "$LICENSE_ARCHIVE"
+    fi
+    [ -f "$LICENSE_ARCHIVE" ] || die "라이선스 원문 출처 파일이 없습니다: $LICENSE_ARCHIVE"
+    case ${LICENSE_SHA256_PINNED:-} in
+        [0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;;
+        *) die "대상 $TARGET_ID 의 full 배포판 SHA-256이 정해지지 않았습니다." ;;
+    esac
+    actual=$(sha256sum -- "$LICENSE_ARCHIVE" | cut -d' ' -f1)
+    [ "$actual" = "$LICENSE_SHA256_PINNED" ] || die "full 배포판 SHA-256 불일치: $actual (기대 $LICENSE_SHA256_PINNED)"
+    # python/licenses/ 만 꺼낸다. zstd 해제는 tar --zstd(zstd 필요) 또는 Python 3.14+ compression.zstd.
+    if command -v zstd >/dev/null 2>&1; then
+        tar --zstd -xf "$LICENSE_ARCHIVE" -C "$LICENSE_WORK" --wildcards 'python/licenses/*'
+    elif command -v python3 >/dev/null 2>&1 && python3 -I -c 'import compression.zstd' >/dev/null 2>&1; then
+        python3 -I -c '
+import sys, tarfile
+from compression import zstd
+with zstd.open(sys.argv[1]) as f, tarfile.open(fileobj=f, mode="r|") as t:
+    for m in t:
+        rest = m.name[len("python/licenses/"):]
+        if m.isfile() and m.name.startswith("python/licenses/") and "/" not in rest:
+            t.extract(m, sys.argv[2], filter="data")
+' "$LICENSE_ARCHIVE" "$LICENSE_WORK"
+    else
+        die "zstd 해제 도구가 없습니다(zstd 또는 Python 3.14 이상). --license-dir로 풀어 둔 폴더를 지정하십시오."
+    fi
+    LICENSE_SRC=$LICENSE_WORK/python/licenses
+    LICENSE_ORIGIN="$LICENSE_FILE sha256=$LICENSE_SHA256_PINNED"
+fi
+for f in "${REQUIRED_RUNTIME_LICENSES[@]}"; do
+    [ -s "$LICENSE_SRC/$f" ] || die "필수 제3자 라이선스 원문이 없습니다: $f"
+done
+echo "제3자 라이선스 원문: $(cd -- "$LICENSE_SRC" && ls LICENSE.*.txt | wc -l)개 ($LICENSE_ORIGIN)"
+
 # ---------------------------------------------------------------- 스테이징
 BUNDLE=$PACKAGE_NAME-$PACKAGE_VERSION-$TARGET_ID
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/aistor-build.XXXXXX")
-trap 'rm -rf -- "$WORK"' EXIT
+trap 'rm -rf -- "$WORK" "$LICENSE_WORK"' EXIT
 STAGE=$WORK/$BUNDLE
-mkdir -p -- "$STAGE/app" "$STAGE/runtime" "$STAGE/licenses"
+mkdir -p -- "$STAGE/app" "$STAGE/runtime" "$STAGE/licenses/third-party"
+
+install -m 0644 -- "$ROOT/LICENSE" "$STAGE/LICENSE"
+for f in "$LICENSE_SRC"/LICENSE.*.txt; do
+    install -m 0644 -- "$f" "$STAGE/licenses/third-party/$(basename -- "$f")"
+done
 
 install -m 0755 -- "$ROOT/run-report.sh" "$STAGE/run-report.sh"
 for f in "${APP_FILES[@]}"; do
@@ -272,18 +356,41 @@ R2_TOOL_VERSION=$R2_VERSION
 SOURCE_COMMIT=$SOURCE_COMMIT
 SOURCE_DIRTY=$SOURCE_DIRTY
 BUILD_DATE=$BUILD_DATE
-LICENSE_STATUS=pending
+LICENSE_STATUS=$LICENSE_STATUS_VALUE
+LICENSE=Proprietary - Copyright (c) 2026 WNYTech. All rights reserved. (internal and customer use only)
+THIRD_PARTY_LICENSE_SOURCE=python-build-standalone $PBS_RELEASE $LICENSE_ORIGIN
 INFO
 
 cat >"$STAGE/licenses/NOTICE-ko.txt" <<NOTICE
-라이선스 고지 (미확정)
+라이선스 및 제3자 고지
+======================
 
-- 분석기 소스(app/, run-report.sh)의 배포 라이선스는 아직 결정되지 않았습니다.
-  외부 배포 전에 라이선스 정책을 확정해야 합니다.
-- 동봉 런타임: CPython $PBS_PYTHON, python-build-standalone $PBS_RELEASE 배포본.
-  CPython 라이선스 전문은 PYTHON-LICENSE.txt에 있습니다.
-  이 런타임은 OpenSSL·zlib·SQLite·libffi 등 제3자 구성요소를 포함합니다.
-  각 구성요소의 라이선스 고지 정리는 외부 배포 전 확인 항목으로 남아 있습니다.
+1. 분석기(app/, run-report.sh 및 배포 안내 문서)
+   Copyright (c) 2026 WNYTech. All rights reserved.
+   WNYTech 사내 및 WNYTech가 제공한 고객사에서 제공 목적으로만 사용할 수 있으며,
+   그 목적 외의 무단 복제·배포를 금지합니다. 전문: 배포물 최상위 LICENSE
+
+2. 동봉 Python 런타임(runtime/python)
+   CPython $PBS_PYTHON, python-build-standalone $PBS_RELEASE 배포판($PBS_TRIPLE).
+   Python Software Foundation License Version 2 등 CPython 라이선스를 따릅니다.
+   - PYTHON-LICENSE.txt         : 런타임에 들어 있는 CPython 라이선스 원문
+   - third-party/LICENSE.*.txt  : 런타임 배포판(python/licenses/)에 들어 있는 원문 그대로
+
+   런타임에 정적으로 포함된 주요 구성요소와 원문 파일:
+   - CPython                     third-party/LICENSE.cpython.txt
+   - OpenSSL 3                   third-party/LICENSE.openssl-3.txt
+   - zlib / zlib-ng              third-party/LICENSE.zlib.txt, LICENSE.zlib-ng.txt
+   - libffi                      third-party/LICENSE.libffi.txt
+   - SQLite                      third-party/LICENSE.sqlite.txt
+   - Expat                       third-party/LICENSE.expat.txt
+   - bzip2                       third-party/LICENSE.bzip2.txt
+   - XZ Utils(liblzma)           third-party/LICENSE.liblzma.txt
+   - mpdecimal                   third-party/LICENSE.mpdecimal.txt
+   - libuuid, ncurses, libedit, Berkeley DB, zstd 등 나머지 파일도 원문 그대로 포함
+
+   Tcl/Tk·Tix·X11(libX11·libXau·libxcb) 관련 모듈은 배포물에서 제거했지만,
+   원 배포판의 고지를 보존하기 위해 해당 원문도 함께 둡니다.
+   출처: $LICENSE_ORIGIN
 NOTICE
 
 cat >"$STAGE/README-ko.txt" <<README
@@ -361,7 +468,7 @@ Python 런타임이 포함되어 있으므로 서버에 Python·pip·패키지�
 --------------
 - 버전·대상·런타임·소스 커밋: RELEASE-INFO
 - 배포물 내부 파일 체크섬: SHA256SUMS (./run-report.sh --verify-bundle 로 검증)
-- 라이선스: licenses/ (분석기 라이선스는 미확정)
+- 라이선스: LICENSE(사내·고객사 전용), 런타임 제3자 고지는 licenses/
 - 업데이트 시 새 버전을 다른 폴더에 압축 해제하고, 이전 버전 폴더와 결과는 그대로 보존하십시오.
 README
 

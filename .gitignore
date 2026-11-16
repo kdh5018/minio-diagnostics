@@ -14,3 +14,4 @@
 !/run-report.sh
 !/build-release.sh
 !/test_shell_release.py
+!/LICENSE
