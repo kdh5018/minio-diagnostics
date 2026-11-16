@@ -521,7 +521,12 @@ def verify_release_tarball(test, tarball, fake_runtime=False):
         test.assertTrue(rel['run-report.sh'].mode & 0o111)
         test.assertTrue(rel['runtime/python/bin/python3'].mode & 0o111)
         for m in members:
-            test.assertFalse(m.issym() or m.islnk() and not m.name.startswith(top + '/runtime/'), m.name)
+            if m.issym() or m.islnk():
+                # Links are allowed only inside the runtime and must stay inside it.
+                test.assertTrue(m.name.startswith(top + '/runtime/'), m.name)
+                target = os.path.normpath(os.path.join(os.path.dirname(m.name), m.linkname)) if m.issym() else m.linkname
+                test.assertFalse(m.linkname.startswith('/'), m.name)
+                test.assertTrue(target.startswith(top + '/runtime/'), (m.name, m.linkname))
             test.assertEqual((m.uid, m.gid), (0, 0))
             test.assertFalse(m.mode & 0o022, m.name)
         forbidden_parts = {'.git', '.tools', '.cache', 'fixtures', 'test-artifacts', 'output-r1', 'CURRENT.json',
