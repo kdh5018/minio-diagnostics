@@ -1,4 +1,4 @@
-# 개선 작업 계획서 (0.4.0~0.4.3)
+# 개선 작업 계획서 (0.4.0~0.4.4)
 
 - 작성: 2026-11-16, 기준 커밋 `f067c0c` (0.3.1 배포 후). 상태 갱신: 2026-11-16, 0.4.0 소스 커밋 `639d60a`
 - 범위: 0.3.1 사용·검증(10월 12일 샘플, 2026-10-14 R3 자료, Rocky 8/9/10 컨테이너)에서 드러난 개선점
@@ -350,3 +350,23 @@
   700/600, 테스트 통과(Rocky 8·9는 빌드 도구 필요 시험 10개 건너뜀, Rocky 10 건너뜀 0). 컨테이너 MD 5종은 0.4.2와 실행 ID·시각·버전 외 동일.
   원본 해시 샘플 2개·R3 418개 전후 동일.
 - 하지 않은 것: 실서버 재시험(이후 Rack 담당), 실제 네트워크 다운로드 실패(대역으로만 시험).
+
+## 0.4.4 단수형 Summary·표시 문제 수정 (2026-11-16)
+
+201 서버 새 수집(`* Results: 32 passed, 2 errors, 1 warning`)이 종료 코드 2로 거부된 문제와 0.4.3 고객 테스트에서 발견한 표시 문제.
+새 테스트는 0.4.3 코드에서 모두 실패하는 것을 먼저 확인했습니다(합성 fixture만 사용, 고객 원본은 저장소에 넣지 않음).
+
+| # | 문제 | 수정 위치 | 테스트 |
+|---|---|---|---|
+| 1 | Summary 정규식이 복수형만 인식(`1 error`·`1 warning` 거부) | `aistordoctor.py` `parse_report()` Summary 정규식 `errors?`·`warnings?\b`, 안내 문구 | `test_r2.py` `Fix044Tests.test_singular_and_plural_summary_standalone_and_combined`(단수·복수·둘 다 1·`1 passed`, R1 단독·R2 결합 main 포함), `test_unrecognized_summary_still_refused` |
+| 2 | R2 결합에서 Markdown 해석 실패를 `원본 gzip(--health)` 탓으로 표시 | `r2_health.py` `report()`가 Markdown을 먼저 해석하고 실패 시 `OfficialInputError`, `main()` 라벨 선택. `aistordoctor.model()`·`r2_enrichment.link()`는 해석 결과를 받아 재사용 | `test_markdown_parse_failure_names_markdown_input`(반대 경우 포함) |
+| a | 상대 경로 입력이 `../`째 표시 | `run-report.sh` `absolute_path()`(기존 출력 경로 정리 함수를 입력에도 적용) | `test_shell_release.py` `test_relative_input_paths_shown_as_clean_absolute_path` |
+| b | MD 표 칸에 `\--as-of 지정`, `3\.4` 같은 백슬래시 | `aistordoctor.md_text()`: 표 칸은 줄머리 이스케이프 생략(인라인 이스케이프 유지) | `test_markdown_table_cell_has_no_line_start_backslash` |
+| c | 입력·출력 충돌 거부에 원인 없음 | `aistordoctor.InputOutputCollision`·`output_failure_lines()`, R1·R2 `main()`. 첫 줄 문구·종료 코드 3 그대로, 경로는 출력하지 않음 | `test_collision_message_states_cause` |
+
+- 기존 `test_arguments_passed_verbatim_and_force_only_when_requested`는 입력을 절대 경로로 전달하게 된 점만 반영.
+- 커밋 `a0a4932`(수정), `9aeed4f`(0.4.4). 배포물 `dist/aistor-diag-analyzer-0.4.4-el8-x86_64.tar.gz` 25,191,749바이트,
+  SHA-256 `4726d41f2da3c8c57b12cb13e2bb07f349702c27cd7dfeafe76f731ce8f18d64`(소스 `9aeed4f`, dirty=no). 0.3.0~0.4.3 해시 그대로.
+- 테스트 149개(59/57/33). git archive 깨끗한 사본 + 0.4.4 배포물 지정, 건너뜀 0.
+- 0.4.3 대비 108개 결과: HTML·JSON·표준 출력·종료 코드 동일. MD 7개에서 표 칸 줄머리 백슬래시만 사라짐.
+- Rocky 8.9·9.3·10.2: 31/2/2, 4/2/1, 수집 오류 6, 결합 거부 161초 종료 코드 2, 원본 해시 2/2·418/418 동일.

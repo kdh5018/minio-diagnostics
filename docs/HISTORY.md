@@ -168,3 +168,9 @@ cd aistor-diag-analyzer-<버전>-el8-x86_64
 0.4.2에서 발견한 5건을 고쳤습니다: 결합 R2의 `--as-of`를 공식 부분에도 적용, CURRENT.json 하드링크 점검을 R1·R2 공용으로,
 10초 처리 제한을 해석 반복마다 확인, 빌드 내려받기는 해시 확인 후에만 캐시에 저장, 시스템 Python 최소 버전을 한 곳에서만 정의.
 `--as-of` 없이 실행한 결과는 0.4.2와 버전 문자열 외 동일, Rocky 8·9·10 재검증 통과. 상세는 [IMPROVEMENT_PLAN.md](IMPROVEMENT_PLAN.md)의 "0.4.3".
+
+### 2026-11-16 0.4.4 단수형 Summary·표시 문제 수정
+
+201 서버 새 수집처럼 Summary가 `1 warning`·`1 error` 단수형이면 입력 오류(종료 코드 2)로 거부되던 문제를 고쳤습니다.
+R2 결합에서 Markdown 해석 오류를 공식 Markdown으로 지목, 상대 경로 입력을 절대 경로로 표시, MD 표의 불필요한 백슬래시 제거,
+입력·출력 충돌 거부 시 원인 표시. 판정·종료 코드·120초 결합 허용치는 그대로. 상세는 [IMPROVEMENT_PLAN.md](IMPROVEMENT_PLAN.md)의 "0.4.4".
