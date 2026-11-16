@@ -6,8 +6,8 @@
 
 | 항목 | 내용 |
 |---|---|
-| 최신 배포본 | 0.4.3 (`el8-x86_64`: RHEL·Rocky·AlmaLinux 8/9/10, x86_64). 런타임 동봉, 서버에 Python 설치 불필요 |
-| 분석기 버전 | R1 `0.4.3-r1`(공식 Markdown), R2 `0.4.3-r2`(원본 gzip 결합, JSON 스키마 `1.3-r2`) |
+| 최신 배포본 | 0.4.4 (`el8-x86_64`: RHEL·Rocky·AlmaLinux 8/9/10, x86_64). 런타임 동봉, 서버에 Python 설치 불필요 |
+| 분석기 버전 | R1 `0.4.4-r1`(공식 Markdown), R2 `0.4.4-r2`(원본 gzip 결합, JSON 스키마 `1.3-r2`) |
 | 검증 | Rocky 8·9·10 최소 컨테이너(Python 없음, 네트워크 차단, 비root), 2026-10-12 샘플, 2026-10-14 R3 실자료 |
 | 라이선스 | 사내·고객사 전용(`LICENSE`). 런타임 제3자 고지는 배포본 `licenses/` |
 | 개선 계획·상태 | [`docs/IMPROVEMENT_PLAN.md`](IMPROVEMENT_PLAN.md) |
