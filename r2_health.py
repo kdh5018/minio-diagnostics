@@ -453,7 +453,7 @@ def main(argv=None):
     except LinkConflict as exc:
         print('R2 입력 오류: 결합 거부', file=sys.stderr)
         for line in conflict_lines(exc.detail):
-            print('  - ' + line, file=sys.stderr)
+            print(('  ' if line.startswith(' ') else '  - ') + line, file=sys.stderr)
         return 2
     except (a.InputError, OSError, UnicodeError, ValueError, TypeError, KeyError) as exc:
         print('R2 입력 오류: 형식·제한·필수 구조를 확인하십시오.', file=sys.stderr)
