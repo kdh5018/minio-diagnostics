@@ -390,6 +390,12 @@ class ShellEntrypointTests(unittest.TestCase):
         self.assertIn('권한 0', p.stderr)
         self.assertIn('소유자 계정으로 실행', p.stderr)
         self.assertNotIn('chmod', p.stderr)
+        # 계정 이름이 없는 UID(컨테이너)에서도 현재 사용자 표시는 한 줄이어야 한다.
+        who = [line for line in p.stderr.splitlines() if '현재 사용자:' in line]
+        self.assertEqual(len(who), 1)
+        self.assertIn('UID %d' % os.getuid(), who[0])
+        self.assertFalse(any(line.strip() == str(os.getuid()) or line.strip().startswith('%d(' % os.getuid())
+                             for line in p.stderr.splitlines()))
         closed = self.base / 'closed dir'
         closed.mkdir()
         inner = self.write_input('closed dir/r.md')
