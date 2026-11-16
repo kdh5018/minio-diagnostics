@@ -224,13 +224,10 @@ if [ -z "$OUT_DIR" ]; then
     [ -n "${HOME:-}" ] || die "$EXIT_OUTPUT" "출력 오류: HOME이 설정되지 않았습니다. --out-dir로 저장 위치를 지정하십시오."
     OUT_DIR=$HOME/aistor-diag-output
 fi
-case $OUT_DIR in
-    /*) ;;
-    *) OUT_DIR=$PWD/$OUT_DIR ;;
-esac
 # 0.4.1: ../ 와 ./ 가 섞인 경로를 실제 절대 경로로 정리해 표시한다(가리키는 위치는 그대로).
 # 상위 디렉터리가 있으면 그 물리 경로(cd -P)를 쓰고, 마지막 이름은 그대로 둔다(심볼릭 링크 거부 검사를 유지).
-normalize_out_dir() {
+# 0.4.4: 입력 파일(--official-report, --health)에도 같은 정리를 적용한다.
+normalize_path() {
     local path=$1 parent base resolved
     while [ "${#path}" -gt 1 ] && [ "${path%/}" != "$path" ]; do path=${path%/}; done
     base=$(basename -- "$path")
@@ -247,7 +244,15 @@ normalize_out_dir() {
     esac
     printf '%s' "$1"
 }
-OUT_DIR=$(normalize_out_dir "$OUT_DIR")
+absolute_path() {
+    case $1 in
+        /*) normalize_path "$1" ;;
+        *) normalize_path "$PWD/$1" ;;
+    esac
+}
+OUT_DIR=$(absolute_path "$OUT_DIR")
+[ -z "$REPORT" ] || REPORT=$(absolute_path "$REPORT")
+[ -z "$HEALTH" ] || HEALTH=$(absolute_path "$HEALTH")
 
 # ---------------------------------------------------------------- 사전 점검
 CHECK_LINES=()

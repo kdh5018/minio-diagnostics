@@ -288,7 +288,7 @@ class ShellEntrypointTests(unittest.TestCase):
         p = self.run_sh(bundle, '--official-report', '-dash.md', '--force', '--allow-partial', cwd=dash.parent)
         self.assertEqual(p.returncode, 0, p.stderr)
         args = self.stub_args()
-        self.assertIn('--official-report=-dash.md', args)
+        self.assertIn('--official-report=' + str(dash.parent.resolve() / '-dash.md'), args)  # 0.4.4: 절대 경로로 정리해 전달
         self.assertIn('--force', args)
         self.assertIn('--allow-partial', args)
 
@@ -541,6 +541,29 @@ class ShellEntrypointTests(unittest.TestCase):
         self.assertNotIn('/./', p.stdout)
         self.assertIn('scp -r', p.stdout)
         self.assertFalse((generation.parent / '.output.lock').exists())
+
+    # -- 0.4.4 ---------------------------------------------------------------
+    def test_relative_input_paths_shown_as_clean_absolute_path(self):
+        # 0.4.4: 입력 경로도 ../ ./ 없이 실제 절대 경로로 표시(가리키는 파일은 같음). R1·R2 모두.
+        bundle = self.make_bundle()
+        work = self.base / '작업 위치'
+        work.mkdir()
+        md = self.write_input('입력 폴더/보고서.md')
+        gz = self.write_gzip('입력 폴더/원본.json.gz')
+        p = self.run_sh(bundle, '--official-report', '../작업 위치/../입력 폴더/./보고서.md', '--out-dir', '출력', cwd=work)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn('입력(공식 Markdown): ' + str(md.resolve()) + '\n', p.stdout)
+        p = self.run_sh(bundle, '--official-report', '../입력 폴더/보고서.md', '--health', './../입력 폴더/원본.json.gz',
+                        '--out-dir', '출력2', '--allow-partial', cwd=work)
+        self.assertIn('입력(원본 gzip): ' + str(gz.resolve()) + '\n', p.stdout)
+        self.assertIn('입력(공식 Markdown): ' + str(md.resolve()) + '\n', p.stdout)
+        # 없는 파일도 정리된 절대 경로로 안내한다.
+        p = self.run_sh(bundle, '--official-report', '../입력 폴더/없음.md', cwd=work)
+        self.assertEqual(p.returncode, 2)
+        self.assertIn(str(md.resolve().parent / '없음.md'), p.stderr)
+        for out in (p.stdout, p.stderr):
+            self.assertNotIn('../', out)
+            self.assertNotIn('/./', out)
 
     def test_nameless_owner_shown_in_korean(self):
         bundle = self.make_bundle()

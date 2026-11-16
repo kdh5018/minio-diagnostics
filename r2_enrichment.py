@@ -128,10 +128,10 @@ def extract(body, normalized, number):
     return configurations, collection, topology
 
 
-def link(body, official_text, stamp):
+def link(body, official_text, stamp, parsed=None):
     if official_text is None:
         return {'status': 'health_only', 'reason': 'optional Markdown not provided', 'same_collection_proven': False}
-    _, collected, checks, _ = a.parse_report(official_text)
+    _, collected, checks, _ = parsed or a.parse_report(official_text)
     found = set()
     for check in checks:
         for block in check['evidence_blocks']:

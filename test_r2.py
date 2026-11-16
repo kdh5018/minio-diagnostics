@@ -572,5 +572,124 @@ class R2Tests(unittest.TestCase):
                     self.assertIn(a.OUTPUT_FAILURE_MESSAGE, e1.getvalue())
 
 
+def summary_md(results, statuses):
+    """Summary 줄과 상세 행 수가 맞는 합성 공식 Markdown(실제 고객 원본 아님)."""
+    rows = ''.join('| %d | %s | c%d.check | Check %d | Observed |\n' % (i + 1, s, i, i) for i, s in enumerate(statuses))
+    details = ''.join('### %d. Check %d (%s)\n**Info:**\n| Server | Value |\n|---|---|\n| secret.internal:9000 | x |\n'
+                      % (i + 1, i, s) for i, s in enumerate(statuses))
+    return ('# MinIO Health Diagnostics Report\n## Summary\n* Date: Mon, 12 Oct 2026 08:56:49 UTC\n* Results: %s\n'
+            '## Errors\n| Index | Status | Check | Name | Description |\n|---|---|---|---|---|\n%s## Failed checks\n%s'
+            % (results, rows, details))
+
+
+class Fix044Tests(unittest.TestCase):
+    """0.4.4: 201 서버 새 수집(단수형 Summary)과 0.4.3 고객 테스트에서 발견한 문제."""
+    CASES = [  # (Summary 줄, 상세 상태들, 기대 요약)
+        ('32 passed, 2 errors, 1 warning', ['error', 'error', 'warning'], (32, 2, 1)),  # 201 서버 수집과 같은 형태
+        ('0 passed, 1 error, 0 warnings', ['error'], (0, 1, 0)),
+        ('1 passed, 0 errors, 1 warning', ['warning'], (1, 0, 1)),
+        ('1 passed, 1 error, 1 warning', ['error', 'warning'], (1, 1, 1)),
+        ('31 passed, 2 errors, 2 warnings', ['error', 'error', 'warning', 'warning'], (31, 2, 2)),
+    ]
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        os.chmod(self.root, 0o700)
+        self.addCleanup(self._tmp.cleanup)
+
+    def run_main(self, main, *argv):
+        import contextlib, io
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = main(list(argv))
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_singular_and_plural_summary_standalone_and_combined(self):
+        gz = self.root / 'in.json.gz'
+        gz.write_bytes(packed(SYNTHETIC))
+        for n, (line, statuses, expected) in enumerate(self.CASES):
+            with self.subTest(summary=line):
+                text = summary_md(line, statuses)
+                want = dict(zip(('passed', 'errors', 'warnings'), expected))
+                standalone = a.model(text)
+                self.assertEqual(standalone['official_summary'], want)
+                self.assertNotIn('summary/detail mismatch', standalone['parser_errors'])
+                combined = h.report(copy.deepcopy(SYNTHETIC), 1, text)
+                self.assertEqual(combined['official_summary'], want)
+                self.assertEqual(combined['input_link']['status'], 'consistent_observations')
+                md = self.root / ('in-%d.md' % n)
+                md.write_text(text, encoding='utf-8')
+                rc, _, err = self.run_main(a.main, '--official-report', str(md), '--out-dir', str(self.root / ('r1-%d' % n)))
+                self.assertEqual(rc, 0, err)
+                rc, _, err = self.run_main(h.main, '--official-report', str(md), '--health', str(gz),
+                                           '--out-dir', str(self.root / ('r2-%d' % n)), '--allow-partial')
+                self.assertIn(rc, (0, 4), err)
+                saved = json.loads((self.root / ('r2-%d' % n) / 'CURRENT.json').read_text())
+                report = json.loads((self.root / ('r2-%d' % n) / saved['generation'] / 'aistor-diag-report.json').read_text()) \
+                    if 'generation' in saved else None
+                if report is not None:
+                    self.assertEqual(report['official_summary'], want)
+
+    def test_unrecognized_summary_still_refused(self):
+        for line in ('1 passed, 1 errorz, 0 warnings', '1 passed, 1 error, 0 warningsx', '1 passed'):
+            with self.subTest(summary=line), self.assertRaises(a.InputError):
+                a.model(summary_md(line, ['error']))
+
+    def test_markdown_parse_failure_names_markdown_input(self):
+        gz, md = self.root / 'in.json.gz', self.root / 'in.md'
+        gz.write_bytes(packed(SYNTHETIC))
+        md.write_text(summary_md('1 passed', ['error']), encoding='utf-8')  # Summary 줄 인식 불가
+        rc, _, err = self.run_main(h.main, '--official-report', str(md), '--health', str(gz),
+                                   '--out-dir', str(self.root / 'out'), '--allow-partial')
+        self.assertEqual(rc, 2)
+        self.assertIn('공식 Markdown(--official-report)', err)
+        self.assertIn('Summary 줄', err)
+        self.assertNotIn('원본 gzip(--health)', err)
+        # 반대로 원본 gzip이 잘못되면 원본 gzip을 지목한다.
+        md.write_text(PAIRED_MD, encoding='utf-8')
+        gz.write_bytes(b'not gzip')
+        rc, _, err = self.run_main(h.main, '--official-report', str(md), '--health', str(gz),
+                                   '--out-dir', str(self.root / 'out'), '--allow-partial')
+        self.assertEqual(rc, 2)
+        self.assertIn('원본 gzip(--health)', err)
+        self.assertNotIn('공식 Markdown(--official-report)', err)
+
+    def test_markdown_table_cell_has_no_line_start_backslash(self):
+        r = h.report(copy.deepcopy(SYNTHETIC), 1, PAIRED_MD, '2026-10-20T01:56:42Z')
+        text = h.markdown_report(r)
+        self.assertIn('| 기준 시각 출처 | --as-of 지정 |', text)
+        self.assertNotIn('\\--as-of', text)
+        self.assertNotIn('\\--as-of', a.markdown(a.model(PAIRED_MD, as_of='2026-10-20T01:56:42Z')))
+        # 표 칸의 인라인 이스케이프(HTML·링크·|)는 그대로.
+        cell = a.md_text('- <b>x</b> | [y](javascript:z)', cell=True)
+        self.assertTrue(cell.startswith('- '))
+        self.assertEqual(cell, '- \\<b>x\\</b> \\| [y\\](javascript:z)')
+
+    def test_collision_message_states_cause(self):
+        md, gz = self.root / 'in.md', self.root / 'in.json.gz'
+        md.write_text(PAIRED_MD, encoding='utf-8')
+        gz.write_bytes(packed(SYNTHETIC))
+        for kind, label in (('official', '공식 Markdown(--official-report)'), ('health', '원본 gzip(--health)')):
+            with self.subTest(kind=kind):
+                out = a.secure_dir(self.root / ('out-' + kind))
+                os.link(md if kind == 'official' else gz, out / 'CURRENT.json')
+                rc, _, err = self.run_main(h.main, '--health', str(gz), '--official-report', str(md),
+                                           '--out-dir', str(out), '--allow-partial', '--force')
+                self.assertEqual(rc, 3)
+                self.assertTrue(err.startswith(a.OUTPUT_FAILURE_MESSAGE), err)
+                self.assertIn('원인: ' + label + ' 파일이 출력 폴더의 최신 결과 포인터(CURRENT.json)와 같은 파일(하드링크)', err)
+                self.assertIn('조치:', err)
+                self.assertNotIn(str(self.root), err)  # 경로는 출력하지 않음
+        rc, _, err = self.run_main(a.main, '--official-report', str(md), '--out-dir', str(self.root / 'out-official'), '--force')
+        self.assertEqual(rc, 3)
+        self.assertIn('원인: 공식 Markdown(--official-report) 파일이 출력 폴더의 최신 결과 포인터(CURRENT.json)와 같은 파일(하드링크)', err)
+        # 입력이 출력 폴더 자체인 경우
+        rc, _, err = self.run_main(a.main, '--official-report', str(md), '--out-dir', str(md), '--force')
+        self.assertEqual(rc, 3)
+        self.assertIn('출력 폴더(--out-dir) 자체', err)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

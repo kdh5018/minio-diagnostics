@@ -250,6 +250,13 @@ def evaluate(n, as_of=None):
     return results
 
 
+class OfficialInputError(a.InputError):
+    """공식 Markdown(--official-report) 해석 실패. 원래 예외는 __cause__에 둔다(원인 안내는 그쪽을 따른다)."""
+
+
+MARKDOWN_ERRORS = (a.InputError, UnicodeError, ValueError, TypeError, KeyError)
+
+
 class LinkConflict(a.InputError):
     """Combined-input refusal. Carries counts and timestamps only (no endpoints or raw text)."""
     def __init__(self, detail):
@@ -276,11 +283,23 @@ def conflict_lines(detail):
 def report(body, documents=1, official_text=None, as_of=None, mask='strict'):
     n, notes = normalize(body)
     checks = evaluate(n, as_of) + enrichment.system_rules(n)
-    pairing = enrichment.link(body, official_text, stamp)
+    parsed = None
+    if official_text is not None:
+        # 0.4.4: 공식 Markdown 해석은 결합 판단 전에 따로 끝내고, 실패하면 Markdown 입력 오류로 표시한다.
+        try:
+            parsed = a.parse_report(official_text)
+        except MARKDOWN_ERRORS as exc:
+            raise OfficialInputError('official markdown') from exc
+    pairing = enrichment.link(body, official_text, stamp, parsed)
     if pairing['status'] == 'conflict':
         raise LinkConflict(dict(pairing.pop('conflict_detail'), delta=pairing['time_delta_seconds']))
     if official_text is not None:
-        r = a.model(official_text, mask, as_of)  # 0.4.3: 공식 부분도 같은 기준 시각(R1과 동일)
+        try:
+            r = a.model(official_text, mask, as_of, parsed)  # 0.4.3: 공식 부분도 같은 기준 시각(R1과 동일)
+        except a.OutputError:
+            raise
+        except MARKDOWN_ERRORS as exc:
+            raise OfficialInputError('official markdown') from exc
     else:
         r = {'schema_version': '1.1-r1', 'official_summary': None, 'findings': [], 'check_results': [],
              'parser_errors': [], 'policy': {'version': 'r2-initial-1', 'profile': 'unspecified'},
@@ -443,7 +462,7 @@ def main(argv=None):
                 raise a.InputError('Markdown limit')
             text = raw.decode('utf-8-sig')
             markdown_stage = False
-        r = report(body, count, text, args.as_of, args.mask)
+        r = report(body, count, text, args.as_of, args.mask)  # Markdown 해석 실패는 OfficialInputError
     except LinkConflict as exc:
         print('R2 입력 오류: 결합 거부', file=sys.stderr)
         for line in conflict_lines(exc.detail):
@@ -451,7 +470,7 @@ def main(argv=None):
         return 2
     except (a.InputError, OSError, UnicodeError, ValueError, TypeError, KeyError) as exc:
         print('R2 입력 오류: 형식·제한·필수 구조를 확인하십시오.', file=sys.stderr)
-        for line in a.describe_input_error(exc, '공식 Markdown(--official-report)' if markdown_stage else '원본 gzip(--health)'):
+        for line in a.describe_input_error(exc, '공식 Markdown(--official-report)' if markdown_stage or isinstance(exc, OfficialInputError) else '원본 gzip(--health)'):
             print('  - ' + line, file=sys.stderr)
         return 2
     except a.OutputError:
@@ -461,9 +480,10 @@ def main(argv=None):
         print('R2 부분 분석: --allow-partial 없이 결과를 확정하지 않습니다.', file=sys.stderr)
         return 4
     try:
-        a.refuse_input_output_alias(args.out_dir, args.health, args.official_report)
-    except (a.OutputError, OSError):
-        print(a.OUTPUT_FAILURE_MESSAGE, file=sys.stderr)
+        a.refuse_input_output_alias(args.out_dir, ('원본 gzip(--health)', args.health),
+                                    ('공식 Markdown(--official-report)', args.official_report))
+    except (a.OutputError, OSError) as exc:
+        print('\n'.join(a.output_failure_lines(exc)), file=sys.stderr)
         return 3
     try:
         generation = a.save(r, args.out_dir, args.force, renderers={

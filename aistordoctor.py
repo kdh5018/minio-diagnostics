@@ -43,13 +43,34 @@ class OutputError(ValueError):
 OUTPUT_FAILURE_MESSAGE = '출력 실패: 경로·충돌·접근권한을 확인하십시오. 기존 확정 결과를 보존합니다.'
 
 
+class InputOutputCollision(OutputError):
+    """입력이 출력 위치와 겹침. 원인 설명(경로·내용 없이 입력 이름만)을 함께 가진다."""
+    def __init__(self, label, reason):
+        super().__init__('input/output collision')
+        self.lines = ['원인: %s 파일이 %s입니다. 저장하면 입력이 바뀌므로 저장하지 않았습니다.' % (label, reason),
+                      '조치: 입력 파일을 다른 위치에 복사해 지정하거나, 다른 --out-dir을 지정하십시오.']
+
+
+def output_failure_lines(exc):
+    """출력 실패 시 stderr 줄. 첫 줄은 항상 OUTPUT_FAILURE_MESSAGE, 원인을 아는 경우 뒤에 덧붙인다."""
+    return [OUTPUT_FAILURE_MESSAGE] + ['  - ' + line for line in getattr(exc, 'lines', [])]
+
+
 def refuse_input_output_alias(out_dir, *sources):
-    """R1·R2 공용: 입력이 출력 폴더 자체이거나 그 CURRENT.json(경로·하드링크 포함)이면 거부한다."""
+    """R1·R2 공용: 입력이 출력 폴더 자체이거나 그 CURRENT.json(경로·하드링크 포함)이면 거부한다.
+
+    sources: (표시 이름, 경로) 쌍. 경로가 None이면 건너뛴다.
+    """
     pointer = out_dir / 'CURRENT.json'
-    for source in sources:
-        if source and (out_dir.resolve() == source.resolve() or pointer.resolve() == source.resolve() or
-                       (pointer.exists() and os.path.samefile(pointer, source))):
-            raise OutputError('input/output collision')
+    for label, source in sources:
+        if not source:
+            continue
+        if out_dir.resolve() == source.resolve():
+            raise InputOutputCollision(label, '출력 폴더(--out-dir) 자체')
+        if pointer.resolve() == source.resolve():
+            raise InputOutputCollision(label, '출력 폴더의 최신 결과 포인터(CURRENT.json)와 같은 경로')
+        if pointer.exists() and os.path.samefile(pointer, source):
+            raise InputOutputCollision(label, '출력 폴더의 최신 결과 포인터(CURRENT.json)와 같은 파일(하드링크)')
 
 
 def check_deadline(deadline):
@@ -59,7 +80,7 @@ def check_deadline(deadline):
 
 # 입력 오류 안내. 키는 이 도구가 만든 고정 문구이며, 입력 내용·경로·원본 오류 본문은 출력하지 않는다.
 INPUT_ERROR_HINTS = {
-    'recognized summary is required': '공식 진단 Markdown의 Summary 줄(Results: N passed, N errors, N warnings)을 찾지 못했습니다. mc가 만든 diag-report-*.md인지 확인하십시오.',
+    'recognized summary is required': '공식 진단 Markdown의 Summary 줄(Results: N passed, N error(s), N warning(s))을 찾지 못했습니다. mc가 만든 diag-report-*.md인지 확인하십시오.',
     'required check table missing': '오류·경고 수가 있는데 검사 표(Check/Status 열)를 찾지 못했습니다. 잘리거나 편집된 Markdown일 수 있습니다.',
     'input limit exceeded': '공식 Markdown 크기·줄 수 제한(2 MiB, 20,000줄)을 넘었습니다.',
     'check limit exceeded': '검사 항목 수 제한(1,000개)을 넘었습니다.',
@@ -428,7 +449,9 @@ def md_line(line, cell=False, line_start=True):
 def md_text(value, *, cell=False, line_start=True):
     """Markdown-escape arbitrary text. Lines are escaped independently (code spans never cross lines)."""
     lines = str(value).replace('\r\n', '\n').replace('\r', '\n').split('\n')
-    rendered = [md_line(line, cell, line_start or index > 0) for index, line in enumerate(lines)]
+    # 0.4.4: 표 칸 안은 줄머리 블록 구조(목록·제목·인용)가 생기지 않으므로 줄머리 이스케이프를 하지 않는다
+    # (예: '\--as-of 지정'). 인라인 이스케이프(HTML·링크·강조·|)는 그대로 적용한다.
+    rendered = [md_line(line, cell, (line_start or index > 0) and not cell) for index, line in enumerate(lines)]
     return ' '.join(rendered) if cell else '\n'.join(rendered)
 
 
@@ -564,7 +587,8 @@ def parse_report(text):
             headers = None
             current = None
         if section == 'summary':
-            match = re.search(r'Results:\s*(\d+)\s+passed,\s*(\d+)\s+errors,\s*(\d+)\s+warnings', line, re.I)
+            # 0.4.4: mc는 개수가 1이면 단수형(1 error, 1 warning)으로 쓴다.
+            match = re.search(r'Results:\s*(\d+)\s+passed,\s*(\d+)\s+errors?,\s*(\d+)\s+warnings?\b', line, re.I)
             if match:
                 if summary is not None:
                     notes.append('duplicate summary')
@@ -723,9 +747,9 @@ class Masker:
                 raise OutputError('secret verification failed')
 
 
-def model(text, mask='strict', as_of=None):
+def model(text, mask='strict', as_of=None, parsed=None):
     started = time.monotonic()
-    summary, collected, checks, notes = parse_report(text)
+    summary, collected, checks, notes = parsed or parse_report(text)
     basis = aware_time(as_of) if as_of else collected
     if as_of and basis is None:
         raise InputError('as-of must include timezone')
@@ -1065,12 +1089,12 @@ def main(argv=None, *, default_out_dir=None):
         return 4
     if args.out_dir:
         try:
-            refuse_input_output_alias(args.out_dir, args.official_report)
+            refuse_input_output_alias(args.out_dir, ('공식 Markdown(--official-report)', args.official_report))
             generation = save(report, args.out_dir, args.force)
             print('결과 세트 확정: ' + str(generation.resolve()))
             print(result_summary_line(report))
-        except (OutputError, OSError):
-            print(OUTPUT_FAILURE_MESSAGE, file=sys.stderr)
+        except (OutputError, OSError) as exc:
+            print('\n'.join(output_failure_lines(exc)), file=sys.stderr)
             return 3
     else:
         print(json.dumps({'official_summary': report['official_summary'], 'run_status': report['run_status'], 'coverage': report['coverage']}, ensure_ascii=False))
