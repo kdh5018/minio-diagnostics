@@ -1,4 +1,4 @@
-# 개선 작업 계획서 (0.4.0~0.4.2)
+# 개선 작업 계획서 (0.4.0~0.4.3)
 
 - 작성: 2026-11-16, 기준 커밋 `f067c0c` (0.3.1 배포 후). 상태 갱신: 2026-11-16, 0.4.0 소스 커밋 `639d60a`
 - 범위: 0.3.1 사용·검증(10월 12일 샘플, 2026-10-14 R3 자료, Rocky 8/9/10 컨테이너)에서 드러난 개선점
@@ -326,3 +326,27 @@
   결합 R2의 `--as-of`가 공식 부분 R1 모델에 전달되지 않음, R2에는 R1의 CURRENT.json 하드링크(samefile) 점검이 없음,
   공식 보고서 구간 파싱 루프가 10초 시한 점검 전에 시한을 넘길 수 있음, build-release.sh 라이선스 다운로드 실패 시 `.part` 처리,
   SYSTEM_PYTHON_MIN 3.9가 RELEASE-INFO와 run-report.sh에 중복.
+  → 0.4.3에서 5건 모두 수정(아래).
+
+## 0.4.3 남은 항목 수정 (2026-11-16)
+
+0.4.2 간소화 중 발견한 5건. 각각 먼저 재현 테스트를 만들어 실패를 확인한 뒤 고쳤습니다(신규 테스트 6개, 수정 전 6개 모두 실패).
+
+| # | 문제 | 재현 | 수정 | 테스트 |
+|---|---|---|---|---|
+| 1 | 결합 R2의 `--as-of`가 공식 부분에 전달되지 않음 | 재현(공식 부분 기준 시각 출처가 `collection`) | `r2_health.py`가 공식 부분 모델에도 같은 기준 시각을 넘김. `--as-of` 미사용 결과는 그대로 | `test_r2.py` `test_combined_as_of_reaches_official_part` |
+| 2 | R2에 R1의 CURRENT.json 하드링크 점검 없음 | 부분 재현: 명시 점검이 없고 문구가 R1과 다름. 저장 단계 보호로 종료 코드 3·입력 무변경은 이미 지켜짐 | `aistordoctor.refuse_input_output_alias()` 공용 함수로 R1·R2 모두 같은 점검, 같은 종료 코드 3·같은 문구(`OUTPUT_FAILURE_MESSAGE`) | `test_r2.py` `test_input_hardlinked_as_current_json_refused_like_r1`(공식·원본 입력 각각, R1 비교 포함) |
+| 3 | 공식 Markdown 구간 해석 루프가 10초 시한을 넘겨도 계속 돎 | 재현(시한 경과 후에도 다음 단계 호출) | `check_deadline()`를 모든 반복 안에서 호출. 섹션 끝 계산은 이분 탐색으로(결과 동일). 10초·종료 코드 의미 그대로 | `run_tests.py` `Fix043Tests` 2개 |
+| 4 | `build-release.sh` 내려받기 실패 시 `.part`가 캐시에 남거나 최종 이름으로 옮겨짐 | 재현(실패 시 `.part` 잔류, 해시 불일치 파일이 최종 이름으로 남음, 라이선스 원본도 같음) | 캐시 폴더 안 임시 파일에 받고 고정 SHA-256이 맞을 때만 `mv`. 실패·불일치는 임시 파일 삭제 후 빌드 중단, 중단 시 EXIT trap이 삭제 | `test_shell_release.py` `test_failed_or_wrong_download_never_reaches_cache`(curl 대역으로 실패·불일치·정상) |
+| 5 | 시스템 Python 최소 버전 3.9가 두 곳에 따로 적힘 | 재현(원본 값을 바꿔도 RELEASE-INFO는 3.9) | `run-report.sh`의 `DEFAULT_SYSTEM_PYTHON_MIN` 한 곳만 원본. 빌드가 읽어 RELEASE-INFO·README-ko 생성 | `test_shell_release.py` `test_system_python_minimum_has_one_source`(값을 바꿔 빌드하면 두 곳 모두 따라감) |
+
+- 커밋: `95deaeb`(수정 5건+테스트), `c3f0c68`(0.4.3 버전 올림).
+- 배포물: `dist/aistor-diag-analyzer-0.4.3-el8-x86_64.tar.gz` 25,191,594바이트,
+  SHA-256 `50195691136de399e8616dc78f3d8df0b5aa5aea48e82e8c10a589e025f0d78e`(소스 `c3f0c68`, dirty=no). 0.3.0~0.4.2 해시 그대로.
+- 테스트: 143개(137+6). 개발 환경 0.4.3 배포물 지정 시 건너뜀 0.
+- 0.4.2 대비 108개 결과 비교: 107개는 버전 문자열 외 동일. 결합 `--as-of` 실행 1건만 의도대로 3개 값이 바뀜
+  (분석 기준 시각·출처 `collection`→`explicit`, 인증서 남은 시간 752,393→784,602초). 판정 개수는 같음.
+- Rocky 8.9·9.3·10.2 컨테이너(Python 없음, 네트워크 차단, UID 1000): 31/2/2, 4/2/1, 수집 오류 6, 결합 거부 161초 종료 코드 2,
+  700/600, 테스트 통과(Rocky 8·9는 빌드 도구 필요 시험 10개 건너뜀, Rocky 10 건너뜀 0). 컨테이너 MD 5종은 0.4.2와 실행 ID·시각·버전 외 동일.
+  원본 해시 샘플 2개·R3 418개 전후 동일.
+- 하지 않은 것: 실서버 재시험(이후 Rack 담당), 실제 네트워크 다운로드 실패(대역으로만 시험).

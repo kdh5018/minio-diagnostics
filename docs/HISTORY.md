@@ -162,3 +162,9 @@ cd aistor-diag-analyzer-<버전>-el8-x86_64
 
 동작은 바꾸지 않고 코드 중복을 줄이고 README를 짧게 했습니다(README 412→49줄, 상세는 docs/로 이동, 배포본 README-ko 124→63줄).
 108개 결과 비교에서 간소화 전과 버전 문자열 외 차이 0, Rocky 8·9·10 컨테이너 재검증 통과. 상세는 [IMPROVEMENT_PLAN.md](IMPROVEMENT_PLAN.md)의 "0.4.2".
+
+### 2026-11-16 0.4.3 남은 항목 수정
+
+0.4.2에서 발견한 5건을 고쳤습니다: 결합 R2의 `--as-of`를 공식 부분에도 적용, CURRENT.json 하드링크 점검을 R1·R2 공용으로,
+10초 처리 제한을 해석 반복마다 확인, 빌드 내려받기는 해시 확인 후에만 캐시에 저장, 시스템 Python 최소 버전을 한 곳에서만 정의.
+`--as-of` 없이 실행한 결과는 0.4.2와 버전 문자열 외 동일, Rocky 8·9·10 재검증 통과. 상세는 [IMPROVEMENT_PLAN.md](IMPROVEMENT_PLAN.md)의 "0.4.3".
