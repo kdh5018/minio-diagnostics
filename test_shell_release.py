@@ -27,6 +27,9 @@ ROOT = Path(__file__).resolve().parent
 RUN = ROOT / 'run-report.sh'
 BUILD = ROOT / 'build-release.sh'
 APP_FILES = ('analyze.py', 'aistordoctor.py', 'r2_health.py', 'r2_enrichment.py')
+REQUIRED_RUNTIME_LICENSES = ('LICENSE.cpython.txt', 'LICENSE.openssl-3.txt', 'LICENSE.zlib.txt', 'LICENSE.libffi.txt',
+                             'LICENSE.sqlite.txt', 'LICENSE.expat.txt', 'LICENSE.bzip2.txt', 'LICENSE.liblzma.txt',
+                             'LICENSE.mpdecimal.txt')
 BASH = shutil.which('bash')
 LINUX = platform.system() == 'Linux' and BASH is not None
 PYVER = '%d.%d.%d' % sys.version_info[:3]
@@ -458,11 +461,20 @@ class ReleasePackagingTests(unittest.TestCase):
                 tar.addfile(info, io.BytesIO(data))
         return archive, hashlib.sha256(archive.read_bytes()).hexdigest()
 
-    def build(self, *extra, sha=None):
+    def fake_licenses(self, skip=()):
+        lic = Path(tempfile.mkdtemp(prefix='licenses-', dir=self.base))
+        for name in REQUIRED_RUNTIME_LICENSES + ('LICENSE.tcl.txt',):
+            if name not in skip:
+                (lic / name).write_text('fake license text for %s\n' % name, encoding='utf-8')
+        return lic
+
+    def build(self, *extra, sha=None, licenses=None):
         archive, digest = self.fake_runtime()
         out = self.base / 'dist'
+        lic = licenses or self.fake_licenses()
         cmd = [BASH, str(BUILD), '--os', 'el8', '--arch', 'x86_64', '--runtime-archive', str(archive),
-               '--runtime-sha256', sha or digest, '--allow-dirty', '--skip-runtime-exec', '--out-dir', str(out), *extra]
+               '--runtime-sha256', sha or digest, '--license-dir', str(lic), '--allow-dirty', '--skip-runtime-exec',
+               '--out-dir', str(out), *extra]
         env = dict(os.environ, TMPDIR=str(self.base))
         return subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=300), out
 
@@ -479,6 +491,28 @@ class ReleasePackagingTests(unittest.TestCase):
         again, _ = self.build()
         self.assertNotEqual(again.returncode, 0)
         self.assertEqual(hashlib.sha256(tarball.read_bytes()).hexdigest(), expected)
+
+    def test_missing_third_party_license_or_project_license_rejected(self):
+        p, out = self.build(licenses=self.fake_licenses(skip=('LICENSE.openssl-3.txt',)))
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn('LICENSE.openssl-3.txt', p.stderr)
+        self.assertFalse(list(out.glob('*.tar.gz')) if out.exists() else [])
+        # The repository LICENSE is part of the tracked source set checked for dirtiness.
+        self.assertIn('run-report.sh LICENSE', BUILD.read_text(encoding='utf-8'))
+        self.assertTrue((ROOT / 'LICENSE').is_file())
+
+    def test_wrong_license_archive_checksum_rejected(self):
+        bogus = self.base / 'bogus-full.tar.zst'
+        bogus.write_bytes(b'not the pinned archive')
+        # Without --license-dir the build must verify the pinned full-archive checksum before extracting.
+        archive, digest = self.fake_runtime()
+        cmd = [BASH, str(BUILD), '--os', 'el8', '--arch', 'x86_64', '--runtime-archive', str(archive),
+               '--runtime-sha256', digest, '--license-archive', str(bogus), '--allow-dirty', '--skip-runtime-exec',
+               '--out-dir', str(self.base / 'dist-bogus')]
+        p = subprocess.run(cmd, capture_output=True, text=True, env=dict(os.environ, TMPDIR=str(self.base)), timeout=120)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn('full 배포판 SHA-256 불일치', p.stderr)
+        self.assertFalse((self.base / 'dist-bogus').exists() and list((self.base / 'dist-bogus').glob('*.tar.gz')))
 
     def test_wrong_runtime_checksum_and_unknown_target_rejected(self):
         p, out = self.build(sha='0' * 64)
@@ -516,7 +550,8 @@ def verify_release_tarball(test, tarball, fake_runtime=False):
         test.assertTrue(top.startswith('aistor-diag-analyzer-'))
         rel = {n[len(top) + 1:]: m for n, m in zip(names, members) if n != top}
         for required in ('run-report.sh', 'RELEASE-INFO', 'README-ko.txt', 'SHA256SUMS', 'licenses/NOTICE-ko.txt',
-                         'licenses/PYTHON-LICENSE.txt', 'runtime/python/bin/python3') + tuple('app/' + f for f in APP_FILES):
+                         'licenses/PYTHON-LICENSE.txt', 'runtime/python/bin/python3', 'LICENSE') + \
+                tuple('app/' + f for f in APP_FILES) + tuple('licenses/third-party/' + f for f in REQUIRED_RUNTIME_LICENSES):
             test.assertIn(required, rel)
         test.assertTrue(rel['run-report.sh'].mode & 0o111)
         test.assertTrue(rel['runtime/python/bin/python3'].mode & 0o111)
@@ -531,7 +566,7 @@ def verify_release_tarball(test, tarball, fake_runtime=False):
             test.assertFalse(m.mode & 0o022, m.name)
         forbidden_parts = {'.git', '.tools', '.cache', 'fixtures', 'test-artifacts', 'output-r1', 'CURRENT.json',
                            'run_tests.py', 'test_r2.py', 'test_shell_release.py', 'verify_browser.cjs', 'README.md',
-                           'R1_ACCEPTANCE.md', 'R1_CONTRACT.json', 'R2_CONTRACT.json', 'build-release.sh', 'LICENSE',
+                           'R1_ACCEPTANCE.md', 'R1_CONTRACT.json', 'R2_CONTRACT.json', 'build-release.sh',
                            'include', 'ensurepip', 'idlelib', 'tkinter'}
         for path in rel:
             parts = path.split('/')
@@ -555,13 +590,23 @@ def verify_release_tarball(test, tarball, fake_runtime=False):
             test.assertEqual(hashlib.sha256(tar.extractfile(m).read()).hexdigest(), listed[path], path)
         info = tar.extractfile(top + '/RELEASE-INFO').read().decode('utf-8')
         for key in ('TARGET_ARCH=', 'TARGET_OS_IDS=', 'TARGET_OS_MAJORS=', 'MIN_GLIBC=', 'PYTHON_VERSION=',
-                    'SOURCE_COMMIT=', 'LICENSE_STATUS=pending'):
+                    'SOURCE_COMMIT=', 'LICENSE_STATUS=proprietary\n', 'THIRD_PARTY_LICENSE_SOURCE='):
             test.assertIn(key, info)
+        test.assertNotIn('pending', info)
+        test.assertEqual(tar.extractfile(top + '/LICENSE').read(), (ROOT / 'LICENSE').read_bytes())
+        notice = tar.extractfile(top + '/licenses/NOTICE-ko.txt').read().decode('utf-8')
+        test.assertIn('Copyright (c) 2026 WNYTech. All rights reserved.', notice)
+        test.assertNotIn('미확정', notice)
+        test.assertIn('LICENSE(사내·고객사 전용)', tar.extractfile(top + '/README-ko.txt').read().decode('utf-8'))
         for f in APP_FILES:
             test.assertEqual(tar.extractfile(top + '/app/' + f).read(), (ROOT / f).read_bytes(), f)
         test.assertEqual(tar.extractfile(top + '/run-report.sh').read(), RUN.read_bytes())
         if not fake_runtime:
             test.assertIn('runtime/python/lib/libpython3.12.so.1.0', rel)
+            # Real artifacts must take third-party notices from the pinned full archive, verbatim.
+            test.assertIn('sha256=', info.split('THIRD_PARTY_LICENSE_SOURCE=', 1)[1].splitlines()[0])
+            openssl = tar.extractfile(top + '/licenses/third-party/LICENSE.openssl-3.txt').read().decode('utf-8')
+            test.assertIn('Apache License', openssl)
 
 
 @unittest.skipUnless(RELEASE, 'AISTOR_DIAG_TEST_RELEASE not set; built release artifact not checked (not a pass)')
