@@ -1,412 +1,49 @@
 # MinIO 진단 분석기
 
-MinIO AIStor의 진단 Markdown(mc 보고서)과 원본 diagnostics gzip을 읽어 HTML·Markdown·JSON 보고서를 만드는 오프라인 분석기입니다.
-분석 환경에 AIStor·mc 설치나 서버 접속은 필요 없습니다. 인터넷·SUBNET·MinIO 서버에 접속하지 않고 서버 설정을 바꾸지 않습니다.
+MinIO AIStor 진단 Markdown(mc 보고서)과 원본 diagnostics gzip을 읽어 HTML·Markdown·JSON 보고서를 만드는 오프라인 분석기입니다.
+서버 접속·인터넷·설치 없이 동작하며, 배포본(`el8-x86_64`: RHEL·Rocky·AlmaLinux 8/9/10)은 Python 런타임을 동봉합니다.
+공식 판정과 이 도구의 자체 점검은 별개이며, 종료 코드 0은 시스템이 정상이라는 뜻이 아닙니다.
 
-## 현재 상태 요약 (2026-11-16)
-
-| 항목 | 내용 |
-|---|---|
-| 최신 배포본 | 0.4.1 (`el8-x86_64`: RHEL·Rocky·AlmaLinux 8/9/10, x86_64). 런타임 동봉, 서버에 Python 설치 불필요 |
-| 분석기 버전 | R1 `0.4.1-r1`(공식 Markdown), R2 `0.4.1-r2`(원본 gzip 결합, JSON 스키마 `1.3-r2`) |
-| 검증 | Rocky 8·9·10 최소 컨테이너(Python 없음, 네트워크 차단, 비root), 2026-10-12 샘플, 2026-10-14 R3 실자료 |
-| 라이선스 | 사내·고객사 전용(`LICENSE`). 런타임 제3자 고지는 배포본 `licenses/` |
-| 개선 계획·상태 | [`docs/IMPROVEMENT_PLAN.md`](docs/IMPROVEMENT_PLAN.md) |
-| 운영 최종 인수 | 미완료. 실제 RHEL·AlmaLinux·실서버 실행, aarch64·Ubuntu 빌드는 하지 않음 |
-
-공식 판정(mc 보고서의 통과·오류·경고)과 이 도구의 자체 점검·해설은 별개입니다.
-미평가·미제공·수집 오류 항목은 정상 판정이 아니며, 종료 코드 0은 시스템이 정상이라는 뜻이 아닙니다.
-
-## 사용자용 빠른 시작 (배포본)
+## 빠른 시작
 
 ```bash
-sha256sum -c aistor-diag-analyzer-0.4.1-el8-x86_64.tar.gz.sha256
-tar -xzf aistor-diag-analyzer-0.4.1-el8-x86_64.tar.gz
-cd aistor-diag-analyzer-0.4.1-el8-x86_64
-./run-report.sh --check --verify-bundle                          # 사전 점검만
-./run-report.sh --official-report /경로/diag-report-....md        # 공식 Markdown 단독
+sha256sum -c aistor-diag-analyzer-0.4.2-el8-x86_64.tar.gz.sha256
+tar -xzf aistor-diag-analyzer-0.4.2-el8-x86_64.tar.gz && cd aistor-diag-analyzer-0.4.2-el8-x86_64
+./run-report.sh --check --verify-bundle                                   # 사전 점검
 ./run-report.sh --official-report /경로/diag-report-....md \
-                --health /경로/diag-data-....json.gz --allow-partial   # 원본 gzip 결합
-./run-report.sh --help                                           # 전체 옵션·예시
+                --health /경로/diag-data-....json.gz --allow-partial     # 실행(--health 생략 시 공식 Markdown 단독)
 ```
 
-- 결과: `~/aistor-diag-output/run-<id>/aistor-diag-report.html`(브라우저로 열기). 서버에 브라우저가 없으면 폴더를 PC로 복사합니다.
-- 공통 옵션: `--lang ko`, `--mask strict|basic`, `--fail-on-priority P1~P4`, `--as-of <시간대 포함 시각>`, `--allow-partial`, `--out-dir`, `--force`.
-- 종료 코드: 0 처리 성공, 1 `--fail-on-priority` 조건 충족, 2 입력 오류(권한·형식·결합 거부 포함, 원인·조치 표시),
-  3 저장·보호 실패, 4 부분 분석, 5 지원하지 않는 실행 환경.
-- 두 입력은 같은 수집에서 나온 것이어야 합니다. 수집 시각 차가 120초를 넘거나 서버 대상이 다르면 결합을 거부합니다.
-- 입력 파일을 읽을 수 없으면 소유자 계정으로 실행하거나 읽을 수 있는 사본을 쓰십시오. 원본 권한은 바꾸지 않습니다.
-
-## 문서 구성
-
-- 이 README: 현재 상태, 빠른 시작, 소스 실행·분석 범위, 테스트, 빌드, 변경 이력
-- [`docs/IMPROVEMENT_PLAN.md`](docs/IMPROVEMENT_PLAN.md): 0.4.0 개선 항목별 문제·변경·완료 기준·상태, 보류 사유, 대상 추가 점검 목록
-- `R1_ACCEPTANCE.md`: R1 인수 기준
-- 배포본 `README-ko.txt`: 서버 사용자용 안내(배포물 안에만 있음)
-
----
-
-아래는 소스 실행과 분석 범위의 상세, 그리고 날짜별 변경 이력입니다.
-
-## 현재 기능
-
-- 공식 요약과 원본에 포함된 개별 검사 결과 읽기
-- 공식 상태와 분석기의 해설용 우선순위 구분
-- HTML·Markdown·JSON 보고서와 SHA-256 manifest 생성
-- 실행마다 새 보고서 세대를 만들고 소유자 전용 접근권한 적용
-- 기존 보고서를 보존하면서 `CURRENT.json`으로 최신 세대 지정
-- 비밀값·식별자 마스킹 적용. 공유 전 수동 검토 필요
-- Info·Resolution의 표·목록·코드를 구조화하고 원본 줄 번호 보존
-- 고유한 공식 검사 ID에 기반한 항목 식별자와 결과 연결
-- 입력 버전·대상·시각을 모를 때 추정하지 않고 결측 이유 표시
-
-MinIO에 접속하거나 보고서 안의 명령을 실행하지 않습니다.
-통과 건수만으로 개별 검사 결과를 만들어내지 않습니다.
-R2는 gzip의 단일 JSON 또는 헤더+진단 JSON을 지원합니다. 형식 버전이 낯설어도 알려진 구조를 분석합니다.
-드라이브 상태·용량 카운터·버전 일치·인증서 유효기간·THP·명시적 IOMMU 옵션·제공된 수집 오류를 점검합니다.
-시점 비교와 메트릭·로그 운영 분석은 아직 지원하지 않습니다.
-
-## 실행 환경
-
-Python 표준 라이브러리만 사용하므로 별도 패키지 설치가 필요하지 않습니다.
-R1은 Linux/WSL의 Python 3.11·3.14 검증 기록이 있습니다. R2는 현재 Docker Python 3.11에서만 실행 검증했습니다.
-
-보고서 저장에는 소유자 전용 권한을 적용할 수 있는 POSIX 파일시스템이 필요합니다.
-Windows 마운트 경로 대신 Linux 홈 아래의 보호 디렉터리를 사용하세요.
-Windows 네이티브 환경의 보고서 저장은 지원하지 않습니다.
-
-```bash
-python3 analyze.py --check-env
-python3 analyze.py --official-report /path/to/approved-report.md --mask strict
-```
-
-기본 저장 경로는 `~/minio-airgap-diag-output`입니다.
-`AISTOR_DIAG_OUTPUT_DIR` 환경변수 또는 `--out-dir` 옵션으로 변경할 수 있으며,
-`--out-dir`이 우선합니다.
-
-결과는 `run-<uuid>/`에 저장됩니다. 기존 결과가 있을 때 `--force`를 추가하면
-이전 세대는 보존하고, 새 파일 검증 후 `CURRENT.json`만 갱신합니다.
-종료 코드 `0`은 분석 처리 성공을 뜻하며, 운영 시스템이 정상이라는 판정은 아닙니다.
-
-생성된 `aistor-diag-report.html`을 브라우저에서 열면 됩니다.
-화면에 필요한 요소가 내장되어 있어 웹 서버는 필요하지 않습니다.
-Windows에서는 다음 WSL 경로로 열 수 있습니다.
-
-`\\wsl.localhost\<distribution>\home\<user>\minio-airgap-diag-output\<generation>\aistor-diag-report.html`.
-
-## R2 실행과 범위
-
-```bash
-python3 analyze.py --health /path/to/approved-data.json.gz --mask strict --force --allow-partial
-python3 analyze.py --health /path/to/approved-data.json.gz --official-report /path/to/approved-report.md --mask strict --force --allow-partial
-```
-
-`--allow-partial`은 자료 부족 항목을 미평가로 남기고 제한 보고서를 저장하겠다는 명시입니다.
-부분 분석은 저장에 성공해도 종료 코드 4입니다. 2는 입력 오류, 3은 저장·보호 실패입니다.
-서버 버전만 없다는 이유로 지원되는 나머지 항목의 처리를 차단하지 않습니다.
-원본 환경변수·라이선스·주소·에러 본문은 내보내지 않고 허용된 관측값과 JSON 위치만 보존합니다.
-서버/드라이브 별칭은 해당 입력 안에서만 유효하며, 다른 시점과의 안정적인 대상 ID가 아닙니다.
-용량 단위는 독립 검증하지 않았으므로 원본 카운터 범위만 비교하고 점유율·추세를 판정하지 않습니다.
-THP 자체 점검은 공식 `sys.mem.thp` Resolution 권장값(enabled=madvise, defrag=defer+madvise 또는 madvise, max_ptes_none=0)과
-관측값을 비교합니다(0.4.0부터, 이전 0.3.x는 never 통과 기준). 공식 판정이 우선하며 실제 지연·장애나 자동 조치를 의미하지 않습니다.
-수집 오류는 고정 분류("대상 / 종류")로만 집계하고 원문은 내보내지 않습니다. `sys.errors`가 없으면 오류 행 수는 최소값으로 표시합니다.
-IOMMU 옵션 부재를 off로 간주하지 않습니다. pool/set 인덱스만으로 quorum·물리 장애 도메인을 계산하지 않습니다.
-인증서는 수집 시점 또는 명시한 `--as-of`에서 유효기간만 점검합니다. 신뢰체인·SAN·만료 임박 정책은 미지원입니다.
-Markdown 결합 시 알려진 Server/Endpoint 표와 수집 시각(허용 차이 120초)을 비교합니다.
-명백한 대상·시각 충돌은 거부합니다(종료 코드 2, 시각 차·대상 수와 조치를 표시). 일치해도 같은 배포·실행을 증명했다고 주장하거나 서로의 결측값을 채우지 않습니다.
-
-## 테스트
-
-```bash
-python3 run_tests.py
-AISTOR_DIAG_TEST_REPORT=/path/to/approved-report.md python3 run_tests.py
-```
-
-승인된 실제 자료가 없으면 실제 자료용 테스트 2개는 건너뛰며, 통과로 간주하지 않습니다.
-자료는 환경변수로 지정하거나 로컬 `fixtures/official-report.md`에 둘 수 있습니다.
-
-합성 테스트 결과는 보호 출력 경로 아래에 보존합니다.
-합성 저장 단위 테스트는 권한 판정 부분만 모의 처리하므로 저장소 보안을 검증한 것으로
-해석하면 안 됩니다. 실제 분석기의 권한 검사는 그대로 유지됩니다.
-
-`0.1.1-r1`에서는 WSL Python 3.14, 기존 실행기 Python 3.11,
-Hermes Docker Python 3.11에서 각각 **44개 통과·실패 0개·보류 0개**를 확인했습니다.
-저장 단계별 실패 주입과 실제 프로세스 간 동시 저장 충돌 검사를 포함합니다.
-상세 R1 범위와 남은 인수 조건은 [R1 검증 현황](R1_ACCEPTANCE.md)을 참고하세요.
-R2 인수 점검 후 Docker에서는 승인된 실제 자료와 합성 사례로 78개 테스트가 통과했습니다.
-JSON 객체를 만들기 전에도 구조 토큰·긴 문자열·긴 스칼라를 제한하며, 디코딩 후 정확한 노드·문자열 한도를 재검사합니다.
-형식 헤더와 제품 버전이 모두 없어도 알려진 본문 구조의 다른 점검을 차단하지 않는 회귀 사례를 포함합니다.
-R2의 WSL·Windows Chrome 실행은 아직 확인하지 않았으며, R1의 통과 기록을 대신 적용하지 않습니다.
-
-```bash
-AISTOR_DIAG_TEST_HEALTH=/path/to/approved-data.json.gz AISTOR_DIAG_TEST_REPORT=/path/to/approved-report.md python3 -m unittest -v run_tests test_r2
-```
-
-실제 자료 테스트는 지정된 기준 샘플(서버 3개·드라이브 기록 12개·공식 요약 31/2/2)에 대한 회귀입니다.
-자료가 없으면 해당 테스트는 건너뛰며 통과로 취급하지 않습니다. 다른 버전·규모 자료의 지원 완료 근거가 아닙니다.
-
-### 선택적 브라우저 검증
-
-기존 Node.js·Playwright·Chrome 검증 환경이 있는 경우 다음 스크립트로
-실제 보고서와 악성 입력으로 만든 합성 보고서를 검사할 수 있습니다.
-분석기 실행에는 이 도구들이 필요하지 않습니다.
-
-```text
-node verify_browser.cjs <실제-보고서.html> <기존-보호-검증-디렉터리> <합성-악성입력-보고서.html>
-```
-
-스크립트는 검증 디렉터리에 화면 이미지와 `result.json`을 저장합니다.
-HTTP 요청을 차단하면서 시도 여부를 기록하고, 필터·검색·키보드 펼치기·인쇄 표시·
-모바일 가로 넘침·HTML 주입을 확인합니다. 공개 저장소에 실제 보고서를 올리지 않습니다.
-
-## 파일 전용 보고서 요구사항 확인 및 화면 보완
-
-기존 R1/R2 구현을 재사용했습니다. 별도 분석기나 새로운 장애 추론 규칙은 추가하지 않았습니다.
-
-- 구현·기존 기능 유지: 공식 Markdown 단독 입력, 선택적 gzip 결합, 헤더 JSON+진단 JSON 읽기,
-  공식 상태·Info·Resolution·근거 보존, 검색·상태·영역 필터, 근거 펼치기,
-  단일 파일 HTML, Python 표준 라이브러리 실행, 보호 세대 저장·manifest·체크섬.
-- 이번 보완: HTML에 서버·드라이브 관측 표와 수집 영역별 오류 기록 수를 별도 표시합니다.
-  공식 오류·경고와 원본 수집 오류는 합산하지 않습니다. 결측값은 미제공/미평가로 표시합니다.
-  추가 표는 관측값 표시만 수행하고 기존 판정 모델을 변경하지 않습니다.
-- 제한: 지원되는 sys 배열의 직접 error/errors 필드에 오류가 기록된 **행 수**를 집계합니다.
-  한 행의 여러 오류 메시지를 각각 센 총 오류 수가 아니며, 오류 본문은 출력하지 않습니다.
-  서버·드라이브 별칭과 기록 수는 물리 장애 도메인을 의미하지 않습니다.
-- 기존 자체 R2 규칙은 공식 결과와 분리된 표시를 유지합니다. THP·TLS 등의 자체 정책은
-  공식 mc 판정을 대체하지 않습니다. 새로운 진단 규칙은 이번 보완 범위에 포함하지 않습니다.
-- SUBNET 분석의 재현은 목표가 아닙니다. mc와 SUBNET의 검사 집합·개수를 덮어쓰지 않습니다.
-
-### 실제로 실행한 명령 형식
-
-승인된 파일을 지정하고 프로젝트 디렉터리에서 실행합니다. REPORT와 HEALTH는 같은 수집의
-공식 Markdown 및 원본 gzip 경로로 바꾸십시오. 아래 변수 자리에는 사용자의 실제 파일 경로를
-지정해야 합니다. 라이브 서버·mc·인터넷·웹 서버는 필요하지 않습니다.
-
-```bash
-REPORT='/승인된/공식/보고서.md'
-HEALTH='/승인된/원본/진단.json.gz'
-OUT='/home/user/minio-airgap-diag-output'
-
-# 공식 보고서 단독: 검증 샘플에서는 종료 코드 0
-PYTHONDONTWRITEBYTECODE=1 python3 analyze.py \
-  --official-report "$REPORT" --out-dir "$OUT" --mask strict --force
-
-# 원본 결합: 제한 보고서는 저장 후 종료 코드 4일 수 있음
-PYTHONDONTWRITEBYTECODE=1 python3 analyze.py \
-  --official-report "$REPORT" --out-dir "$OUT" --mask strict --force \
-  --health "$HEALTH" --allow-partial
-
-# 원본을 저장소에 복사하지 않고 실제 자료 테스트
-PYTHONDONTWRITEBYTECODE=1 \
-  AISTOR_DIAG_TEST_REPORT="$REPORT" AISTOR_DIAG_TEST_HEALTH="$HEALTH" \
-  python3 -m unittest run_tests test_r2
-```
-
-`--force`는 이전 세대를 삭제하지 않고 최신 포인터만 새 검증 세대로 갱신합니다.
-CLI가 출력한 새 run 디렉터리의 `aistor-diag-report.html`을 직접 여십시오.
-WSL 배포 이름은 자신의 환경에서 확인하고 다음 경로의 `<distribution>`에 넣습니다.
-
-```text
-\\wsl.localhost\<distribution>\home\user\minio-airgap-diag-output\run-<uuid>\aistor-diag-report.html
-```
-
-### 이번 검증의 범위와 남은 조건
-
-- 현재 Docker Python 3.11에서 변경 전 78개, 보완 후 83개 테스트 통과. 실패·오류·건너뜀 없음.
-- 이전에 제공된 2026-10-12 실제 자료로 단독·결합 CLI를 실행했습니다. 새 세대 두 개의
-  HTML·Markdown·JSON·manifest를 다시 읽고 공식 요약 31/2/2와 모든 공식 finding·check_results가
-  단독 공식 입력 모델과 동일함을 확인했습니다.
-- 해당 원본에서 CPU 영역 오류 기록 3행, 네트워크 영역 오류 기록 3행을 별도로 표시했습니다.
-- 새 세대 디렉터리 0700, 파일 0600, 소유자와 manifest SHA-256를 확인했습니다.
-  실행 전 원본 두 파일과 기존 보고서 48개 파일의 해시를 기록하고 생성 후 동일함을 확인했습니다.
-- 네트워크 연결·DNS 함수를 차단한 파일 읽기·보고서 렌더링 검사에서 연결 시도 0건을 확인했습니다.
-  HTML 외부 자산 태그 없음과 JavaScript 구문 검사도 확인했습니다. 이는 브라우저의 실제 요청
-  관찰이나 OS 수준 완전한 네트워크 격리 시험을 대신하지 않습니다.
-- 요청된 2026-10-14 R3 자료 경로는 현재 Docker에 마운트되어 있지 않았습니다.
-  그 자료의 신규 검증·SUBNET 비교·원본 보존 검증은 미완료입니다. 과거 샘플을 R3 검증으로 간주하지 않습니다.
-- Windows Chrome·Playwright·WSL 실행 연결이 현재 컨테이너에 없어 최신 HTML의 file:// 열람,
-  필터·검색·펼치기·외부 요청 0건 브라우저 검증은 미실시입니다. 기존 R1 기록을 대신 적용하지 않습니다.
-- 전체 요청의 인수 완료 조건은 R3 파일의 읽기 전용 접근과 Windows 브라우저 검증을 확보하는 것입니다.
-  패키지 설치나 보호 권한 우회로 이를 대체하지 않습니다.
-
-## 변경 이력
-
-최근 기록이 아래에 있습니다. 각 기록은 당시 상태 그대로 두고, 뒤에 바뀐 점만 "→"로 덧붙였습니다.
-
-### 2026-11-16 현황: Python 없는 서버용 배포본
-
-위 기록은 그대로 두고 이번 변경만 추가합니다. 분석 엔진(`analyze.py`·R1·R2)은 바꾸지 않았습니다.
-
-#### 배포본 실행 (`run-report.sh`)
-
-고객 서버에 Python이나 패키지를 설치하지 않고, 런타임을 동봉한 폴더형 tar.gz를 풀어 실행합니다.
-
-```bash
-tar xzf aistor-diag-analyzer-<버전>-el8-x86_64.tar.gz
-cd aistor-diag-analyzer-<버전>-el8-x86_64
-./run-report.sh --check --verify-bundle
-./run-report.sh --official-report /경로/공식보고서.md
-./run-report.sh --official-report /경로/공식보고서.md --health /경로/원본.json.gz --allow-partial
-```
-
-- 스크립트 위치 기준으로 동작해 어느 디렉터리에서 호출해도 됩니다. 공백·한글 경로를 지원하고 `eval`을 쓰지 않습니다.
-- 기본 출력 위치는 `~/aistor-diag-output`이며 `--out-dir`로 바꿉니다. 상대 경로는 호출한 위치 기준입니다.
-- R2(`--health`)에서는 `--fail-on-priority`·`--lang`·`--mask basic`을 실행 전에 거부합니다(종료 코드 2).
-  → 0.4.0에서 두 실행 방식 공통 옵션으로 바뀌었습니다.
-- 분석기의 종료 코드 0~4를 그대로 돌려줍니다. 4(부분 분석)로 저장된 경우에도 결과 경로를 안내합니다.
-  `--force`는 사용자가 지정한 경우에만 전달합니다.
-- 사전 점검: OS(ID·주 버전)·CPU 아키텍처·glibc·동봉 런타임 실행(noexec 포함)·입력 파일·출력 폴더 권한(0700, 소유자)·
-  심볼릭 링크를 확인합니다. 지원하지 않는 환경은 설치를 시도하지 않고 종료 코드 **5**로 안내합니다.
-- `--use-system-python`은 검증된 시스템 python3(3.9 이상)를 쓸 때만 선택합니다. 기본은 동봉 런타임입니다.
-
-#### 배포본 빌드 (`build-release.sh`, 개발 환경 전용)
-
-```bash
-./build-release.sh --list-targets
-./build-release.sh --os el8 --arch x86_64      # 결과: dist/
-```
-
-- 대상은 OS·아키텍처 인자로 고릅니다. 현재 활성 대상은 `el8-x86_64`(RHEL·Rocky·AlmaLinux 8/9/10, glibc 2.28 이상) 하나입니다.
-  aarch64·Ubuntu는 스크립트 안의 예시 블록을 채워 추가합니다(미빌드·미검증).
-- 런타임: python-build-standalone 20261110, CPython 3.12.16 (`install_only_stripped`), SHA-256 고정 검증.
-  런타임 요구 glibc 최대 기호는 2.17입니다. 테스트·IDLE·tkinter·pip 등은 제거합니다.
-- 커밋되지 않은 변경이 있으면 빌드를 거부합니다. tar.gz는 정렬·소유자 0·고정 mtime으로 결정적으로 만듭니다.
-- 배포본에는 `run-report.sh`, `app/`(분석기 4개 파일), `runtime/`, `RELEASE-INFO`, `README-ko.txt`,
-  `SHA256SUMS`, `licenses/`만 들어갑니다. `.git`, 인증정보, 진단 원본, 생성 보고서, 테스트·백업·로그,
-  내부 계약서, 내부 경로 문자열이 있으면 빌드가 실패합니다.
-
-#### 이번 검증 결과 (2026-11-16)
-
-- 테스트: 기존 83개 + 신규 `test_shell_release.py` 19개 = 102개.
-  - WSL Python 3.14.4, 10월 12일 샘플과 배포본 지정 시: 102개 통과, 건너뜀 0.
-  - 동봉 런타임(3.12.16)으로 Rocky 8.9·9.3 컨테이너: 102개 중 99개 통과, 3개 건너뜀
-    (최소 이미지에 `find`·`xargs`가 없어 빌드 테스트 3개 제외). Rocky 10.2: 102개 통과, 건너뜀 0.
-- 배포물: `aistor-diag-analyzer-0.3.0-el8-x86_64.tar.gz`, 25,158,944 bytes,
-  SHA-256 `18522fe1620fb8ecbc92e83fad331c2646e338854b7f00e16037edd4ea1a1b1d`, 소스 커밋 `6215c29` (dirty=no).
-  배포물은 저장소에 넣지 않습니다(`dist/`는 추적 제외).
-- 깨끗한 환경: Docker `rockylinux:8-minimal`(8.9, glibc 2.28)·`9-minimal`(9.3, glibc 2.34)·
-  `rockylinux/rockylinux:10-minimal`(10.2, glibc 2.39). `python3`·`python`·platform-python·python RPM 없음,
-  `--network none`, 비root uid 1500. 이미지에는 tar·gzip만 추가했습니다(실서버 기본 포함 도구).
-  - 세 환경 모두 `--check --verify-bundle` 0, 공식 단독 0, 원본 결합 `--allow-partial` 4(결과 경로 안내).
-  - 생성 세대 0700, HTML·MD·JSON·manifest 0600, manifest SHA-256 일치.
-  - 공식 요약 31/2/2, 서버 3, 드라이브 12, 수집 오류 기록 6행. 입력 경로는 공백·한글 포함 읽기 전용 마운트.
-- 원본 보존: 10월 12일 샘플 두 파일의 SHA-256이 작업 전후 동일합니다.
-- 브라우저(P5): Windows Chrome 157 + Playwright로 동봉 런타임이 만든 최신 결합 HTML을 `file://`로 열어
-  `verify_browser.cjs`를 실행했습니다. 필터 18개, 검색, 키보드 펼치기, 인쇄 표시, 악성 마크업 합성 보고서,
-  데스크톱·모바일 가로 넘침 없음, 외부 요청·페이지 오류·콘솔 오류 0건. 생성 보고서와 화면 이미지는 확인 후 삭제했습니다.
-
-#### 남은 항목
-
-- P4: 2026-10-14 R3 자료를 받지 못해 미완료입니다. 다른 자료로 대체하지 않았습니다.
-  → 같은 날 후속 작업에서 사용 승인을 받아 검증했습니다(아래 "2026-11-16 후속" 절).
-- 라이선스: 프로젝트 라이선스와 동봉 런타임의 제3자 고지 정리가 미결입니다(`LICENSE` 파일 없음,
-  `RELEASE-INFO`의 `LICENSE_STATUS=pending`). 배포 전 결정이 필요합니다.
-  → 같은 날 사내·고객사 전용으로 확정했습니다(아래 "2026-11-16 후속" 절).
-
-### 2026-11-16 후속: 라이선스 확정, 0.3.1 배포본, R3 실자료 검증
-
-위 기록은 그대로 두고 이번 변경만 추가합니다. 분석 엔진(`analyze.py`·R1·R2)은 바꾸지 않았습니다.
-
-#### 라이선스
-
-- 저장소 최상위 `LICENSE`: Copyright (c) 2026 WNYTech. All rights reserved. 사내 및 WNYTech가 제공한 고객사에서
-  제공 목적으로만 사용하며, 그 목적 외의 무단 복제·배포를 금지합니다. 오픈소스 라이선스가 아닙니다.
-- 배포본에는 `LICENSE`, `licenses/PYTHON-LICENSE.txt`, `licenses/third-party/LICENSE.*.txt`(20개),
-  `licenses/NOTICE-ko.txt`가 들어갑니다. `RELEASE-INFO`는 `LICENSE_STATUS=proprietary`입니다.
-- 제3자 고지는 stripped 런타임에 들어 있지 않아, 같은 빌드의 full 배포판
-  (`cpython-3.12.16+20261110-x86_64-unknown-linux-gnu-pgo+lto-full.tar.zst`,
-  SHA-256 `a1b98760371cfd145a1533ea75c89437cdaf538e84c5e84c469eda9065a251af`)의 `python/licenses/` 원문을 그대로 씁니다.
-  CPython·OpenSSL 3·zlib·libffi·SQLite·Expat·bzip2·liblzma·mpdecimal 원문이 없으면 빌드가 실패합니다.
-- 빌드 환경에서 `.tar.zst`를 풀려면 `zstd` 또는 Python 3.14 이상이 필요합니다(없으면 `--license-dir`).
-  → 0.4.0에서 해제 도구 선택지를 넓히고 원문 파일별 SHA-256 대조를 추가했습니다.
-
-#### 0.3.1 배포물
-
-- `aistor-diag-analyzer-0.3.1-el8-x86_64.tar.gz`, 25,180,589 bytes,
-  SHA-256 `b7a34e012924653888c401aa23fb0396cb4be33506322884178941820f6e1ee8`, 소스 커밋 `76972c8` (dirty=no).
-  0.3.0 배포물은 지우지 않았습니다.
-- 테스트: 104개(기존 83 + 쉘·패키징 21). WSL Python 3.14.4에서 샘플·배포물 지정 시 104개 통과(건너뜀 0),
-  지정하지 않으면 건너뜀 8. Rocky 8.9·9.3 컨테이너(동봉 런타임) 104개 중 건너뜀 5(최소 이미지에 `find`·`xargs`가 없어
-  빌드 테스트 제외), Rocky 10.2 건너뜀 0.
-- 깨끗한 환경: Rocky 8.9·9.3·10.2 최소 이미지, Python·python RPM 없음, `--network none`, 비root.
-  세 환경 모두 `--check --verify-bundle` 0, 10월 12일 샘플 단독 0·결합 4, R3 단독 0·결합 4.
-  결과 세대 0700, 파일 0600, manifest SHA-256 일치.
-  R3 원본은 소유자 전용(0600)이라 해당 실행은 소유자 uid(1000, 비root)로 했습니다. 다른 uid로는 읽지 못해
-  종료 코드 2(입력 오류)로 거부되는 것도 확인했습니다. 원본 권한은 바꾸지 않았습니다.
-
-#### P4: R3 실자료 검증 (2026-10-14 수집)
-
-| 실행 | 종료 코드 | 공식 요약(통과/오류/경고) | 비고 |
-|---|---|---|---|
-| `collection/` 공식 Markdown 단독 | 0 | 31/2/2 (35개) | `success` |
-| `local-input/` 공식 Markdown 단독 | 0 | 31/2/2 (35개) | `success` |
-| `collection/` Markdown + gzip 결합(`--allow-partial`) | 4 | 31/2/2 | `partial`, 서버 3, 드라이브 12, 수집 오류 6(CPU 3, 네트워크 3) |
-| `local-input/` Markdown + gzip 결합(추가 확인) | 2 | - | 입력 연결 검사 거부: Markdown 시각 07:11:00과 원본 07:08:18의 차이 161초가 허용 120초 초과 |
-
-- 사용자 설명과 대조: mc 35개 통과 31·오류 2·경고 2 일치. 원본 수집 오류 CPU governor 파일 없음 3건 + NIC ring
-  미지원 3건 일치(도구는 오류 문구를 내보내지 않으므로 영역별 건수로 확인하고, 문구 종류는 원본을 읽기 전용으로 분류).
-- 공식 오류·경고 검사: `minio.cluster.min`·`sys.mem.iommu`(오류), `minio.net.tls.valid`·`sys.mem.thp`(경고).
-- 두 Markdown 차이: 보고서 날짜(07:08:22 대 07:11:00)와 THP 표 한 행
-  (`pool1.server2` 항목이 `collection/`에서는 `max_ptes_none 0→511`, `local-input/`에서는 `enabled madvise→always`).
-  요약 수치와 검사 목록은 같습니다.
-- SUBNET 결과(33개, 통과 29·실패 2·경고 2)는 검사 집합이 달라 대조하지 않았습니다.
-- 원본 보존: R3 폴더 전체 418개 파일의 SHA-256이 작업 전후 동일하고, 폴더 안에 새 파일이 생기지 않았습니다.
-  입력 3개 파일은 폴더 자체의 `SHA256SUMS`와도 일치합니다. 실자료 fixture 기대값은 바꾸지 않았습니다.
-  생성 보고서는 컨테이너 임시 메모리와 저장소 밖 임시 폴더에만 만들었고 확인 후 삭제했습니다.
-
-#### 남은 항목 (후속)
-
-- GitHub 저장소가 공개 상태인데 `LICENSE`는 비공개(사내·고객사 전용)입니다. 공개 여부는 별도 결정 사항입니다.
-- 실제 RHEL·AlmaLinux와 실서버(Rocky 9.4) 실행은 하지 않았습니다. 컨테이너는 Rocky 최소 이미지 기준입니다.
-- aarch64·Ubuntu 대상은 정의만 예시로 두었고 빌드·검증하지 않았습니다.
-
-### 2026-11-16 0.4.1 고객 관점 수정
-
-- MD 엔티티 제거(CommonMark 이스케이프), 결합 IOMMU `None` 제거, 영문 코드에 한국어 라벨,
-  공개 커널·부트 경로와 공식 문서 URL 원문 표시(호스트·IP·일련번호·`host:port`는 계속 가림),
-  절대 경로 표시, `.output.lock` 제거(디렉터리 잠금), 인증서 남은 시간 기준 시각 표시, README-ko 입력·결과 옮기기 안내.
-- 배포물: `aistor-diag-analyzer-0.4.1-el8-x86_64.tar.gz` 25,193,631바이트,
-  SHA-256 `8899f458eaef753c0bca9c5ddfbe7bad4f47a27b91a828c71b335b0bf0d9401d`(소스 `c9333ee`).
-- 테스트 137개, Rocky 8·9·10 컨테이너·실자료 검증. 항목별 상태는 계획서의 "0.4.1 고객 관점 수정".
-
-### 2026-11-16 0.4.0 개선
-
-계획·항목별 상태는 [`docs/IMPROVEMENT_PLAN.md`](docs/IMPROVEMENT_PLAN.md)에 있습니다.
-
-- 보고서: '확인된 정보'·'한계'를 사람이 읽는 표로 바꾸고, 공식 판정 줄과 분석 상태를 구분해 표시합니다.
-- THP 자체 점검을 공식 `sys.mem.thp` 권장값 기준으로 바꿨습니다(이전 never 통과 기준은 0.3.x까지).
-- `--lang`·`--fail-on-priority`·`--mask basic`을 R1·R2 공통으로 지원합니다.
-- 결합 거부 시 시각 차(초)·허용치·양쪽 수집 시각·조치를 표시합니다. 120초 허용치는 그대로입니다.
-- 입력 파일 권한·종류 안내, 수집 오류 고정 분류 집계, `sys.errors` 결측 시 최소값 표시, 실행 후 한 줄 요약.
-- `run-report.sh`: 도움말·오타 안내·결과 보기 안내. `build-release.sh`: zstd 해제 경로 확대, 라이선스 원문 SHA-256 대조,
-  재현 가능한 빌드, 대상 추가를 표 한 줄로.
-- 배포물: `aistor-diag-analyzer-0.4.0-el8-x86_64.tar.gz` 25,186,796바이트,
-  SHA-256 `2ba5b1688e7a574db2079e52c5d0d192ca64c5d3091eaf1b993efde25309be28`(소스 `639d60a`). 0.3.0·0.3.1은 유지.
-- 검증: 테스트 119개 통과(개발 환경·Rocky 10 건너뜀 0, Rocky 8·9 빌드 시험 8개 건너뜀),
-  Rocky 8.9·9.3·10.2 컨테이너(Python 없음, 네트워크 차단, 비root)에서 10월 12일 샘플·R3 자료 실행,
-  원본 해시 전후 동일, Chrome 브라우저 점검 통과. 상세는 계획서의 "검증 결과".
-- 실제 RHEL·AlmaLinux·실서버 실행, aarch64·Ubuntu 빌드는 하지 않았습니다.
-
-## Git 관리 범위
-
-분석기 코드·테스트·공개 사용 안내만 추적합니다.
-진단 원본, 생성 보고서, 로컬 운영 계약서, Router 연동 유틸리티,
-인증정보, 로그, 백업은 로컬에 남깁니다.
-
-`.gitignore`는 허용 목록 방식입니다. 커밋 전에 변경 내용과 허용 목록을 확인하세요.
-자동 마스킹을 적용했더라도 실제 진단 자료와 토큰은 커밋하지 않습니다.
-분석기 실행에는 GitHub 인증이 필요하지 않습니다.
-
-## 커밋 메시지 규칙
-
-`유형: 변경 내용` 형식으로 한글 한 줄을 작성합니다.
-
-- `기능`: 기능 추가
-- `수정`: 오류 수정
-- `문서`: README 등 문서 변경
-- `테스트`: 테스트 추가·보완
-- `관리`: Git 설정 등 유지보수
-
-예: `문서: README 한글화 및 커밋 규칙 추가`
-
-제목에는 실제 변경만 짧게 적고, 서로 다른 목적의 변경은 별도 커밋으로 나눕니다.
+결과는 `~/aistor-diag-output/run-<id>/aistor-diag-report.html`입니다. 서버에 브라우저가 없으면 안내되는 scp 명령으로 PC에 복사해 엽니다.
+
+## 종료 코드
+
+| 코드 | 의미 |
+|---|---|
+| 0 | 처리 성공(시스템 정상 판정 아님) |
+| 1 | `--fail-on-priority` 조건 충족 |
+| 2 | 입력 오류(권한·형식·결합 거부 포함, 원인·조치 표시) |
+| 3 | 저장·보호 실패 |
+| 4 | 부분 분석(제한 보고서 저장됨) |
+| 5 | 지원하지 않는 실행 환경 |
+
+## 주요 옵션
+
+| 옵션 | 설명 |
+|---|---|
+| `--official-report <md>` / `--health <json.gz>` | 입력. 두 입력은 같은 수집이어야 하며 시각 차 120초 초과·대상 불일치면 거부 |
+| `--allow-partial` | 자료 부족 항목을 미평가로 두고 저장(종료 코드 4) |
+| `--out-dir <dir>` / `--force` | 출력 위치(기본 `~/aistor-diag-output`) / 기존 결과가 있을 때 새 세대 추가 |
+| `--mask strict\|basic` | 마스킹 수준(기본 strict). 공유 전 수동 검토 필요 |
+| `--fail-on-priority P1~P4`, `--as-of <시각>`, `--lang ko` | 우선순위 기준 종료, 판정 기준 시각, 언어 |
+| `--check`, `--verify-bundle`, `--help` | 사전 점검만, 배포물 체크섬 확인, 전체 옵션·예시 |
+
+입력 파일을 읽을 수 없으면 소유자 계정으로 실행하거나 읽을 수 있는 사본을 쓰십시오. 원본 권한은 바꾸지 않습니다.
+
+## 문서
+
+- [docs/USAGE.md](docs/USAGE.md): 현재 상태, 소스 실행, 분석 범위·제약
+- [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md): 테스트, 빌드, Git 관리·커밋 규칙
+- [docs/HISTORY.md](docs/HISTORY.md): 날짜별 변경·검증 이력
+- [docs/IMPROVEMENT_PLAN.md](docs/IMPROVEMENT_PLAN.md): 개선 항목별 상태, [R1_ACCEPTANCE.md](R1_ACCEPTANCE.md): R1 인수 기준
+- 라이선스: 사내·고객사 전용(`LICENSE`), 런타임 제3자 고지는 배포본 `licenses/`
