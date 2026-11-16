@@ -158,3 +158,7 @@ cd aistor-diag-analyzer-<버전>-el8-x86_64
   원본 해시 전후 동일, Chrome 브라우저 점검 통과. 상세는 계획서의 "검증 결과".
 - 실제 RHEL·AlmaLinux·실서버 실행, aarch64·Ubuntu 빌드는 하지 않았습니다.
 
+### 2026-11-16 0.4.2 코드·문서 간소화
+
+동작은 바꾸지 않고 코드 중복을 줄이고 README를 짧게 했습니다(README 412→49줄, 상세는 docs/로 이동, 배포본 README-ko 124→63줄).
+108개 결과 비교에서 간소화 전과 버전 문자열 외 차이 0, Rocky 8·9·10 컨테이너 재검증 통과. 상세는 [IMPROVEMENT_PLAN.md](IMPROVEMENT_PLAN.md)의 "0.4.2".
