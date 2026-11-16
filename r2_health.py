@@ -15,7 +15,8 @@ import zlib
 import aistordoctor as a
 import r2_enrichment as enrichment
 
-VERSION = '0.2.2-r2-candidate'
+VERSION = '0.4.0-r2'
+SCHEMA_VERSION = '1.3-r2'
 MAX_COMPRESSED = 32 * 1024 * 1024
 MAX_EXPANDED = 64 * 1024 * 1024
 MAX_DEPTH = 64
@@ -258,22 +259,45 @@ def evaluate(n, as_of=None):
     return results
 
 
-def report(body, documents=1, official_text=None, as_of=None):
+class LinkConflict(a.InputError):
+    """Combined-input refusal. Carries counts and timestamps only (no endpoints or raw text)."""
+    def __init__(self, detail):
+        super().__init__('health/Markdown evidence conflict; no combined report')
+        self.detail = detail
+
+
+def conflict_lines(detail):
+    lines = ['공식 Markdown과 원본 gzip이 같은 수집으로 확인되지 않아 결합 보고서를 만들지 않았습니다(안전장치, 완화 불가).']
+    if detail.get('time_conflict'):
+        lines.append('수집 시각 차이: %s초 (허용 %s초 이내만 결합)' % (int(abs(detail['delta'])), enrichment.TIME_TOLERANCE_SECONDS)
+                     if detail.get('delta') is not None else '수집 시각 차이가 허용 범위를 넘었습니다.')
+        lines.append('  · 공식 Markdown 시각: %s' % (a.with_kst(detail.get('markdown_collected_at')) or a.MISSING))
+        lines.append('  · 원본 gzip 시각: %s' % (a.with_kst(detail.get('health_collected_at')) or a.MISSING))
+        lines.append('  · 로컬에서 원본 gzip으로 다시 만든 Markdown은 Date가 생성 시각이라 수집 시각과 다를 수 있습니다.')
+    if detail.get('target_conflict'):
+        lines.append('서버 대상 불일치: Markdown %s개 / gzip %s개 / 공통 %s개 (주소는 출력하지 않음)' % (
+            detail.get('markdown_target_count'), detail.get('health_target_count'), detail.get('shared_target_count')))
+    lines += ['조치: 같은 mc 수집 실행에서 함께 받은 diag-report-*.md와 diag-data-*.json.gz를 지정하거나,',
+              '      각 파일을 따로 분석하십시오(--official-report만 또는 --health만).']
+    return lines
+
+
+def report(body, documents=1, official_text=None, as_of=None, mask='strict'):
     n, notes = normalize(body)
     checks = evaluate(n, as_of) + enrichment.system_rules(n)
     pairing = enrichment.link(body, official_text, stamp)
     if pairing['status'] == 'conflict':
-        raise a.InputError('health/Markdown evidence conflict; no combined report')
+        raise LinkConflict(dict(pairing.pop('conflict_detail'), delta=pairing['time_delta_seconds']))
     if official_text is not None:
-        r = a.model(official_text)
+        r = a.model(official_text, mask)
     else:
         r = {'schema_version': '1.1-r1', 'official_summary': None, 'findings': [], 'check_results': [],
              'parser_errors': [], 'policy': {'version': 'r2-initial-1', 'profile': 'unspecified'},
              'input_metadata': {}, 'source_versions': {}, 'facts': {}, 'coverage': {}, 'completeness': {},
-             'masking': {'level': 'strict', 'policy_version': 'r2-allowlist-1', 'limitations': 'R2 원본은 허용 필드만 추출하며 공유 전 수동 검토가 필요합니다.'}}
+             'masking': {'level': mask, 'policy_version': 'r2-allowlist-1', 'limitations': 'R2 원본은 허용 필드만 추출하며 공유 전 수동 검토가 필요합니다.'}}
     r['policy'] = {'version': 'r2-initial-1', 'profile': 'unspecified', 'official_explanations': 'r1-1'}
     r['tool_version'] = VERSION
-    r['schema_version'] = '1.2-r2'
+    r['schema_version'] = SCHEMA_VERSION
     r['input_metadata']['parser_version'] = 'r2-structural-2'
     r['input_metadata']['health'] = {'id': 'health-001', 'documents': documents, 'collected_at': n['collected_at'],
                                     'format_version': str(body.get('version')) if type(body.get('version')) in (str, int) and re.fullmatch(r'[0-9]{1,8}', str(body['version'])) else None,
@@ -286,8 +310,10 @@ def report(body, documents=1, official_text=None, as_of=None):
     r['input_link'] = pairing
     if pairing['status'] == 'insufficient_evidence':
         notes.append('input correspondence evidence insufficient')
-    if n['collection']['reported_error_count']:
+    if n['collection']['observed_error_rows']:
         notes.append('reported collector errors; source coverage incomplete')
+    if n['collection']['count_basis'] != 'complete':
+        notes.append('collection error count incomplete')
     r['parser_errors'].extend(notes)
     r['check_results'].extend(checks)
     for c in checks:
@@ -317,42 +343,70 @@ def view(r):
     return v
 
 
-def observations_html(r):
-    """Presentation only: render allowlisted observations, never new diagnoses."""
+SECTION_LABELS = {'cpus': 'CPU 정보', 'netinfo': '네트워크 정보', 'partitions': '파티션', 'osinfo': 'OS 정보',
+                  'meminfo': '메모리', 'procinfo': '프로세스', 'errors': '시스템 오류', 'services': '서비스', 'config': '설정'}
+INCOMPLETE_LABELS = {'sys_errors_missing_or_not_list': 'sys.errors 배열 없음 또는 형식 다름'}
+
+
+def error_count_text(collection):
+    if collection.get('reported_error_count') is not None:
+        return collection['reported_error_count']
+    if collection.get('observed_error_rows'):
+        return '최소 %s (전체 수 미확정)' % collection['observed_error_rows']
+    return None
+
+
+def observation_blocks(r):
+    """Presentation only: allowlisted observations as label/value tables, never new diagnoses."""
     n = r.get('facts', {}).get('health')
     if not isinstance(n, dict):
-        return ''
-    esc = lambda value: a.html.escape(str(value), quote=True)
-    def value(item):
-        return '미제공 / 미평가' if item is None else esc(item)
-    def table(headers, rows):
-        head = '<tr>' + ''.join('<th>' + esc(x) + '</th>' for x in headers) + '</tr>'
-        body = ''.join('<tr>' + ''.join('<td>' + value(x) + '</td>' for x in row) + '</tr>' for row in rows)
-        return '<div class="table-scroll"><table>' + head + body + '</table></div>'
-    sections = ['<section id="raw-observations"><h2>원본 관측 정보 (공식 판정과 별도)</h2>',
-                '<p>원본 수집 시각: ' + value(n.get('collected_at')) + '</p>',
-                '<p>서버·드라이브 수는 제공된 기록 수입니다. 물리 서버·장애 도메인·quorum을 뜻하지 않습니다.</p>',
-                '<h3>서버 기록</h3>']
-    sections.append(table(['대상 별칭', '관측 버전', '원본 JSON 위치'],
-        [(s['id'], s['version'], s['source_locator']['json_path']) for s in n['servers']]))
-    sections.extend(['<h3>드라이브 기록</h3>', '<p>용량은 원본 카운터입니다. 단위·점유율·성능을 확정하지 않습니다.</p>'])
-    sections.append(table(['드라이브 별칭', '서버 별칭', '관측 상태', 'totalspace', 'usedspace', 'availspace', '원본 JSON 위치'],
-        [(d['id'], d['server_id'], d['state'], d['totalspace'], d['usedspace'], d['availspace'], d['source_locator']['json_path']) for d in n['drives']]))
+        return []
+    blocks = [('h', 2, '원본 관측 정보 (공식 판정과 별도)'),
+              ('kv', '원본 수집 시각: ', a.with_kst(n.get('collected_at'))),
+              ('p', '서버·드라이브 수는 제공된 기록 수입니다. 물리 서버·장애 도메인·quorum을 뜻하지 않습니다.'),
+              ('h', 3, '서버 기록'),
+              ('table', ['대상 별칭', '관측 버전', '원본 JSON 위치'],
+               [(s['id'], s['version'], s['source_locator']['json_path']) for s in n['servers']]),
+              ('h', 3, '드라이브 기록'),
+              ('p', '용량은 원본 카운터입니다. 단위·점유율·성능을 확정하지 않습니다.'),
+              ('table', ['드라이브 별칭', '서버 별칭', '관측 상태', 'totalspace', 'usedspace', 'availspace', '원본 JSON 위치'],
+               [(d['id'], d['server_id'], d['state'], d['totalspace'], d['usedspace'], d['availspace'], d['source_locator']['json_path']) for d in n['drives']])]
+    configs = n.get('system_configurations') or []
+    if configs:
+        blocks += [('h', 3, '시스템 설정 관측(THP·IOMMU·rlimit)'),
+                   ('p', '자체 점검의 THP 권장값: enabled=madvise, defrag=defer+madvise 또는 madvise, max_ptes_none=0 (공식 sys.mem.thp Resolution 기준, 공식 판정은 별도).'),
+                   ('table', ['설정 별칭', '서버 별칭', 'THP enabled', 'THP defrag', 'max_ptes_none', 'rlimit-max', '명시적 IOMMU 옵션'],
+                    [(c['id'], c['server_id'], c['thp_enabled'], c['thp_defrag'], c['thp_max_ptes_none'], c['rlimit_max'],
+                      ', '.join('%s=%s' % (k, v if v is not None else '모호') for k, v in sorted(c['iommu_flags'].items())) or '명시 없음')
+                     for c in configs])]
     collection = n['collection']
-    sections.extend(['<h3>원본 수집 오류 (공식 검사 오류와 별도)</h3>',
-        '<p>지원 필드에서 오류가 기록된 행 수: <strong>' + value(collection['reported_error_count']) + '</strong></p>',
-        '<p>오류 본문·내부 주소는 내보내지 않습니다. 기록이 없다는 것은 전체 수집 성공의 증거가 아닙니다.</p>'])
-    labels = {'cpus': 'CPU 정보', 'netinfo': '네트워크 정보', 'partitions': '파티션', 'osinfo': 'OS 정보',
-              'meminfo': '메모리', 'procinfo': '프로세스', 'errors': '시스템 오류', 'services': '서비스', 'config': '설정'}
-    sections.append(table(['수집 영역', '제공 기록 수', '오류 기록 행 수', '입력 지원 상태', '원본 JSON 위치'],
-        [(labels.get(k, k), v['records'], v['reported_errors'],
-          '제공' if v['status'] == 'provided' else '미제공 / 미지원', '$.sys.' + k)
-         for k, v in collection['sections'].items()]))
-    sections.extend(['<details><summary>수집 범위·미지원·결합 제한</summary><pre>' +
-        esc(a.json.dumps({'collection_scope': collection['scope'], 'coverage': r['coverage'],
-                         'input_link': r['input_link'], 'parser_notes': r['parser_errors']}, ensure_ascii=False, indent=2)) +
-        '</pre></details></section>'])
-    return ''.join(sections)
+    blocks += [('h', 3, '원본 수집 오류 (공식 검사 오류와 별도)'),
+               ('kv', '지원 필드에서 오류가 기록된 행 수: ', error_count_text(collection)),
+               ('p', '오류 본문·내부 주소는 내보내지 않습니다. 기록이 없다는 것은 전체 수집 성공의 증거가 아닙니다.')]
+    reasons = collection.get('incomplete_reasons') or []
+    if reasons:
+        blocks.append(('p', '전체 오류 수를 확정하지 못한 이유: ' + ', '.join(
+            INCOMPLETE_LABELS.get(x) or ('형식 이상 행: ' + SECTION_LABELS.get(x.split(':', 1)[-1], x)) for x in reasons)))
+    blocks.append(('table', ['수집 영역', '제공 기록 수', '오류 기록 행 수', '입력 지원 상태', '원본 JSON 위치'],
+                   [(SECTION_LABELS.get(k, k), v['records'], v['reported_errors'],
+                     '제공' if v['status'] == 'provided' else '미제공 / 미지원', '$.sys.' + k)
+                    for k, v in collection['sections'].items()]))
+    typed = [(SECTION_LABELS.get(k, k), label, count) for k, v in collection['sections'].items() for label, count in (v.get('error_types') or {}).items()]
+    if typed:
+        blocks += [('p', '오류 유형(고정 분류, 원인 확정 아님):'),
+                   ('table', ['수집 영역', '대상 / 유형', '행 수'], typed)]
+    link = r.get('input_link') or {}
+    blocks.append(('details', '수집 범위·미지원·결합 제한', [
+        ('table', ['항목', '값'], [('수집 오류 집계 범위', '인식된 sys 배열의 error/errors 필드만 집계(부재가 전체 수집 성공을 증명하지 않음)'),
+                                  ('입력 결합 상태', a.ko(link.get('status'))),
+                                  ('같은 수집 실행 증명', '아니오'),
+                                  ('토폴로지', 'pool·set 인덱스만 표시, quorum·장애 도메인 미추론')])]))
+    return blocks
+
+
+def observations_html(r):
+    blocks = observation_blocks(r)
+    return '<section id="raw-observations">' + a.blocks_html(blocks) + '</section>' if blocks else ''
 
 
 def html_report(r):
@@ -366,29 +420,46 @@ def html_report(r):
     return body.replace('<label>공식 상태 ', '<label>공식/자체 결과 ')
 
 
+def markdown_report(r):
+    return a.markdown(view(r), observation_blocks(r))
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description='R2 offline health subset analyzer')
     parser.add_argument('--health', type=Path, required=True)
     parser.add_argument('--version', action='version', version=VERSION)
     parser.add_argument('--official-report', type=Path)
     parser.add_argument('--out-dir', type=Path, default=a.DEFAULT_OUTPUT_DIR)
-    parser.add_argument('--mask', choices=('strict',), default='strict')
+    parser.add_argument('--mask', choices=('basic', 'strict'), default='strict')
+    parser.add_argument('--lang', choices=('ko',), default='ko')
+    parser.add_argument('--fail-on-priority', choices=('P1', 'P2', 'P3', 'P4'))
     parser.add_argument('--as-of')
     parser.add_argument('--force', action='store_true')
     parser.add_argument('--allow-partial', action='store_true')
     args = parser.parse_args(argv)
     try:
+        text_stage = [False]
         body, count = read(args.health)
         text = None
         if args.official_report:
+            text_stage[0] = True
             with args.official_report.open('rb') as stream:
                 raw = stream.read(a.MAX_BYTES + 1)
             if len(raw) > a.MAX_BYTES:
                 raise a.InputError('Markdown limit')
             text = raw.decode('utf-8-sig')
-        r = report(body, count, text, args.as_of)
-    except (a.InputError, OSError, UnicodeError, ValueError, TypeError, KeyError):
+            text_stage[0] = False
+        r = report(body, count, text, args.as_of, args.mask)
+    except LinkConflict as exc:
+        print('R2 입력 오류: 결합 거부', file=sys.stderr)
+        for line in conflict_lines(exc.detail):
+            print('  - ' + line, file=sys.stderr)
+        return 2
+    except (a.InputError, OSError, UnicodeError, ValueError, TypeError, KeyError) as exc:
         print('R2 입력 오류: 형식·제한·필수 구조를 확인하십시오.', file=sys.stderr)
+        markdown_stage = text_stage[0]
+        for line in a.describe_input_error(exc, '공식 Markdown(--official-report)' if markdown_stage else '원본 gzip(--health)'):
+            print('  - ' + line, file=sys.stderr)
         return 2
     except a.OutputError:
         print('R2 마스킹 실패: 결과를 저장하지 않았습니다.', file=sys.stderr)
@@ -401,9 +472,15 @@ def main(argv=None):
             if source and (source.resolve() == args.out_dir.resolve() or source.resolve() == (args.out_dir / 'CURRENT.json').resolve()):
                 raise a.OutputError('input/output collision')
         generation = a.save(r, args.out_dir, args.force, renderers={
-            'markdown': lambda x: a.markdown(view(x)), 'html': html_report})
+            'markdown': markdown_report, 'html': html_report})
         print('R2 결과 세트 확정: ' + str(generation))
+        print(a.result_summary_line(r))
     except (a.OutputError, OSError):
         print('R2 저장 실패: 기존 확정 세트를 보존합니다.', file=sys.stderr)
         return 3
-    return 4 if r['run_status'] == 'partial' else 0
+    if r['run_status'] == 'partial':
+        return 4
+    # R1과 같은 의미: 지정한 우선순위의 항목이 있으면 1 (부분 분석 4가 우선).
+    if args.fail_on_priority and any(f['priority'] == args.fail_on_priority for f in r['findings']):
+        return 1
+    return 0

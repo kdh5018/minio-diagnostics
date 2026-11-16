@@ -4,6 +4,7 @@ import re
 
 import aistordoctor as a
 
+TIME_TOLERANCE_SECONDS = 120  # 결합 안전장치. 완화하지 않는다.
 SYSTEM_SECTIONS = ('cpus', 'partitions', 'osinfo', 'meminfo', 'procinfo', 'netinfo', 'errors', 'services', 'config')
 
 
@@ -23,6 +24,26 @@ def active_thp(value):
         return None
     selected = re.findall(r'\[(always|madvise|never|defer|defer\+madvise)\]', value)
     return selected[0] if len(selected) == 1 else value if value in ('always', 'madvise', 'never') else None
+
+
+# 공식 sys.mem.thp 검사 Resolution에 적힌 권장값. 공식 판정 자체는 공식 Markdown 결과가 우선한다.
+THP_OFFICIAL_RECOMMENDED = {'thp_enabled': ('madvise',), 'thp_defrag': ('defer+madvise', 'madvise'), 'thp_max_ptes_none': (0,)}
+
+# 수집 오류 유형 분류. 고정 라벨만 내보내며 원문·경로·장치명은 저장하지 않는다. 원인 확정이 아니다.
+ERROR_SUBJECTS = (('CPU 주파수 정책(cpufreq/scaling_governor)', re.compile(r'scaling_governor|cpufreq', re.I)),
+                  ('NIC ring 파라미터', re.compile(r'ring param', re.I)))
+ERROR_KINDS = (('파일 없음', re.compile(r'no such file|not found|does not exist', re.I)),
+               ('미지원', re.compile(r'not supported|unsupported|not implemented', re.I)),
+               ('권한 거부', re.compile(r'permission denied|operation not permitted|access denied', re.I)),
+               ('시간 초과', re.compile(r'timeout|timed out|deadline', re.I)))
+
+
+def classify_error(value):
+    texts = [value] if isinstance(value, str) else [x for x in value if isinstance(x, str)] if isinstance(value, list) else []
+    text = ' '.join(texts)[:4096]
+    subject = next((label for label, rx in ERROR_SUBJECTS if rx.search(text)), '미분류 대상')
+    kind = next((label for label, rx in ERROR_KINDS if rx.search(text)), '기타')
+    return subject + ' / ' + kind
 
 
 def extract(body, normalized, number):
@@ -54,22 +75,36 @@ def extract(body, normalized, number):
                 'target_scope': 'reported endpoint; physical-host identity not established'})
     coverage = {}
     errors = 0
-    malformed = False
+    types = Counter()
+    incomplete = []
+    if not isinstance(sys.get('errors'), list):
+        incomplete.append('sys_errors_missing_or_not_list')
     for section in SYSTEM_SECTIONS:
         records = sys.get(section)
         if not isinstance(records, list):
-            coverage[section] = {'status': 'missing_or_unrecognized', 'records': None, 'reported_errors': None}
+            coverage[section] = {'status': 'missing_or_unrecognized', 'records': None, 'reported_errors': None,
+                                 'malformed_records': None, 'error_types': {}}
             continue
-        section_errors = 0
+        section_errors = malformed = 0
+        section_types = Counter()
         for row in records:
             if not isinstance(row, dict):
-                malformed = True
+                malformed += 1
                 continue
             if bool(row.get('error')) or bool(row.get('errors')):
                 section_errors += 1
+                section_types[classify_error(row.get('error') or row.get('errors'))] += 1
+        if malformed:
+            incomplete.append('malformed_records:' + section)
         errors += section_errors
-        coverage[section] = {'status': 'provided', 'records': len(records), 'reported_errors': section_errors}
-    collection = {'reported_error_count': errors if isinstance(sys.get('errors'), list) and not malformed else None,
+        types.update(section_types)
+        coverage[section] = {'status': 'provided', 'records': len(records), 'reported_errors': section_errors,
+                             'malformed_records': malformed, 'error_types': dict(sorted(section_types.items()))}
+    # reported_error_count는 기존 계약(불완전하면 None)을 유지하고, 관측 하한은 별도 필드로 둔다.
+    collection = {'reported_error_count': None if incomplete else errors,
+                  'observed_error_rows': errors, 'count_basis': 'lower_bound' if incomplete else 'complete',
+                  'incomplete_reasons': incomplete, 'error_type_counts': dict(sorted(types.items())),
+                  'error_type_scope': 'fixed labels from pattern matching; cause not established; raw text excluded',
                   'sections': coverage, 'error_text_excluded': True,
                   'scope': 'direct error/errors fields in recognized sys arrays; absence is not proof of full collection'}
     groups = Counter((d['pool_index'], d['set_index']) for d in normalized['drives'] if d['pool_index'] is not None and d['set_index'] is not None)
@@ -98,35 +133,74 @@ def link(body, official_text, stamp):
     raw_time = stamp(body.get('timestamp'))
     delta = (collected - raw_time).total_seconds() if collected and raw_time else None
     targets_match = bool(found and targets) and found == targets
-    time_matches = delta is not None and abs(delta) <= 120
-    conflict = bool(found and targets and found != targets) or delta is not None and abs(delta) > 120
-    return {'status': 'conflict' if conflict else 'consistent_observations' if targets_match and time_matches else 'insufficient_evidence',
-            'targets_match': targets_match, 'time_delta_seconds': delta, 'time_tolerance_seconds': 120,
-            'same_collection_proven': False, 'deployment_identity_proven': False,
-            'reason': 'targets and bounded timestamps only; no collection/deployment identifier proof; no cross-filling'}
+    time_matches = delta is not None and abs(delta) <= TIME_TOLERANCE_SECONDS
+    target_conflict = bool(found and targets and found != targets)
+    time_conflict = delta is not None and abs(delta) > TIME_TOLERANCE_SECONDS
+    result = {'status': 'conflict' if target_conflict or time_conflict else 'consistent_observations' if targets_match and time_matches else 'insufficient_evidence',
+              'targets_match': targets_match, 'time_delta_seconds': delta, 'time_tolerance_seconds': TIME_TOLERANCE_SECONDS,
+              'same_collection_proven': False, 'deployment_identity_proven': False,
+              'reason': 'targets and bounded timestamps only; no collection/deployment identifier proof; no cross-filling'}
+    if result['status'] == 'conflict':
+        # 안내 메시지용 세부(대상은 개수만, 주소는 포함하지 않음). 저장 결과에는 넣지 않는다.
+        result['conflict_detail'] = {'time_conflict': time_conflict, 'target_conflict': target_conflict,
+            'markdown_collected_at': collected.isoformat() if collected else None,
+            'health_collected_at': raw_time.isoformat() if raw_time else None,
+            'markdown_target_count': len(found), 'health_target_count': len(targets),
+            'shared_target_count': len(found & targets)}
+    return result
+
+
+def thp_result(configurations):
+    # 관측값을 공식 Resolution 권장값과 비교한다. 결측값은 일치로 간주하지 않는다.
+    if not configurations:
+        return None, 'thp_config_missing'
+    mismatch, complete = False, True
+    for config in configurations:
+        for key, allowed in THP_OFFICIAL_RECOMMENDED.items():
+            value = config.get(key)
+            if value is None:
+                complete = False
+            elif value not in allowed:
+                mismatch = True
+    if mismatch:
+        return 'warning', 'observed_value_differs_from_official_recommendation'
+    if complete:
+        return 'pass', 'all_observed_values_match_official_recommendation'
+    return None, 'thp_values_missing_or_ambiguous'
 
 
 def system_rules(n):
     configurations = n['system_configurations']
     rules = []
-    def add(rid, title, result, reason, required, condition, path):
-        rules.append({'id': rid, 'rule_id': rid, 'rule_version': 'r2-system-1', 'source_check_id': None,
+    def add(rid, title, result, reason, required, condition, path, version='r2-system-1'):
+        rules.append({'id': rid, 'rule_id': rid, 'rule_version': version, 'source_check_id': None,
             'origin': 'custom_rule', 'official_status': None, 'official_status_reason': 'not_applicable',
             'rule_result': result, 'assessment': 'assessable' if result else 'insufficient_data', 'reason': reason,
             'title': title, 'category': '설정', 'required_inputs': required, 'condition': condition,
             'source_locator': {'input': 'health-001', 'json_path': path}, 'basis': n['collected_at']})
-    modes = [c['thp_enabled'] for c in configurations]
-    result = ('pass' if all(x == 'never' for x in modes) else 'warning') if modes and all(modes) else None
-    add('r2.thp.mode', 'THP 활성 설정 관측', result, 'observed_mode_only' if result else 'active_mode_missing', ['sys.config.thp-config.enabled'],
-        '도구의 초기 정책: never는 통과, always/madvise는 검토 경고. 실제 지연·장애를 확정하거나 자동 변경하지 않음', '$.sys.config')
+    result, reason = thp_result(configurations)
+    add('r2.thp.mode', 'THP 설정과 공식 권장값 비교(자체 점검)', result, reason,
+        ['sys.config.thp-config.enabled', 'sys.config.thp-config.defrag', 'sys.config.thp-config.max_ptes_none'],
+        '자체 점검: 공식 sys.mem.thp 검사 Resolution의 권장값(enabled=madvise, defrag=defer+madvise 또는 madvise, max_ptes_none=0)과 관측값을 비교. '
+        '하나라도 다르면 경고, 세 값이 모두 관측·일치하면 통과, 값이 없으면 미평가. 공식 판정은 공식 보고서 결과가 우선하며 실제 지연·장애를 확정하거나 자동 변경하지 않음',
+        '$.sys.config', 'r2-system-2')
     flags = [c['iommu_flags'] for c in configurations]
     result = None
     if flags and all(x and all(v is not None for v in x.values()) for x in flags):
         result = 'pass' if len({tuple(sorted(x.items())) for x in flags}) == 1 else 'warning'
     add('r2.iommu.consistency', '명시적 IOMMU 부팅 옵션 일치', result, 'explicit_flags_only' if result else 'explicit_flags_unobserved_or_ambiguous', ['sys.config.proc-cmdline'],
         '명시된 옵션만 비교. 옵션 부재를 off로 해석하지 않으며 하드웨어 지원·I/O 장애는 판정하지 않음', '$.sys.config')
-    count = n['collection']['reported_error_count']
-    result = 'warning' if count else 'pass' if count == 0 else None
-    add('r2.collection.errors', '제공된 수집 오류 기록', result, 'recognized_error_fields_only' if result else 'error_coverage_unavailable', ['sys.errors'],
-        '알려진 sys 배열의 비어 있지 않은 error/errors만 집계. 기록 부재는 전체 수집 성공을 증명하지 않음', '$.sys')
+    collection = n['collection']
+    count, observed = collection['reported_error_count'], collection.get('observed_error_rows')
+    if count:
+        result, reason = 'warning', 'recognized_error_fields_only'
+    elif count == 0:
+        result, reason = 'pass', 'recognized_error_fields_only'
+    elif observed:
+        result, reason = 'warning', 'lower_bound_error_rows_observed'
+    else:
+        result, reason = None, 'error_coverage_unavailable'
+    add('r2.collection.errors', '제공된 수집 오류 기록', result, reason, ['sys.errors'],
+        '알려진 sys 배열의 비어 있지 않은 error/errors만 집계. sys.errors 부재나 형식 이상 행이 있으면 관측 행 수는 최소값이며, 이때 0건이면 미평가. '
+        '기록 부재는 전체 수집 성공을 증명하지 않음', '$.sys', 'r2-system-2')
     return rules

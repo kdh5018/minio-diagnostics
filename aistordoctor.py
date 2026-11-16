@@ -16,7 +16,7 @@ import sys
 import time
 import uuid
 
-VERSION = '0.1.1-r1'
+VERSION = '0.4.0-r1'
 SCHEMA_VERSION = '1.1-r1'
 PARSER_VERSION = 'official-markdown-r1-2'
 POLICY_VERSION = 'r1-1'
@@ -36,6 +36,253 @@ class InputError(ValueError):
 
 class OutputError(ValueError):
     pass
+
+
+# 입력 오류 안내. 키는 이 도구가 만든 고정 문구이며, 입력 내용·경로·원본 오류 본문은 출력하지 않는다.
+INPUT_ERROR_HINTS = {
+    'recognized summary is required': '공식 진단 Markdown의 Summary 줄(Results: N passed, N errors, N warnings)을 찾지 못했습니다. mc가 만든 diag-report-*.md인지 확인하십시오.',
+    'required check table missing': '오류·경고 수가 있는데 검사 표(Check/Status 열)를 찾지 못했습니다. 잘리거나 편집된 Markdown일 수 있습니다.',
+    'input limit exceeded': '공식 Markdown 크기·줄 수 제한(2 MiB, 20,000줄)을 넘었습니다.',
+    'check limit exceeded': '검사 항목 수 제한(1,000개)을 넘었습니다.',
+    'detail limit exceeded': '상세 검사 절 수 제한(1,000개)을 넘었습니다.',
+    'block limit exceeded': '근거 블록 수 제한(2,000개)을 넘었습니다.',
+    'processing time limit exceeded': '처리 시간 제한(10초)을 넘었습니다.',
+    'as-of must include timezone': '--as-of에는 시간대가 필요합니다. 예: 2026-10-12T09:00:00+09:00 또는 2026-10-12T00:00:00Z',
+    'timezone-aware as-of required': '--as-of에는 시간대가 필요합니다. 예: 2026-10-12T09:00:00+09:00 또는 2026-10-12T00:00:00Z',
+    'Markdown limit': '공식 Markdown 크기 제한(2 MiB)을 넘었습니다.',
+    'gzip signature or compressed limit': 'gzip 파일이 아니거나 압축 크기 제한(32 MiB)을 넘었습니다. 공식 Markdown은 --official-report로 지정하십시오.',
+    'expanded size limit': '압축 해제 크기 제한(64 MiB)을 넘었습니다.',
+    'nesting limit': 'JSON 중첩 깊이 제한(64단계)을 넘었습니다.',
+    'serialized string limit before decoding': 'JSON 문자열 길이 제한을 넘었습니다.',
+    'scalar token limit before decoding': 'JSON 값 길이 제한을 넘었습니다.',
+    'structural token limit before decoding': 'JSON 요소 수 제한을 넘었습니다.',
+    'resource limit': 'JSON 요소 수 또는 처리 시간 제한을 넘었습니다.',
+    'string limit': 'JSON 문자열 길이 제한(65,536자)을 넘었습니다.',
+    'processing time limit': '처리 시간 제한(10초)을 넘었습니다.',
+    'ambiguous document count': 'gzip 안의 JSON 문서가 3개 이상입니다(지원: 본문 1개 또는 머리말+본문 2개).',
+    'unsupported document structure': 'gzip 안의 JSON 구조가 지원 형식(객체 1~2개)이 아닙니다.',
+    'unsupported header structure': 'gzip 첫 JSON 문서가 머리말이 아니라 본문으로 보입니다(지원하지 않는 구조).',
+    'duplicate JSON key': 'JSON에 중복 키가 있어 해석을 거부했습니다.',
+    'invalid JSON value': 'JSON에 NaN·Infinity 같은 허용되지 않는 값이 있습니다.',
+    'minimum server-array structure unavailable': '원본 gzip에 MinIO 서버 정보 배열(minio.info.servers)이 없습니다. mc 진단 원본(diag-data-*.json.gz)인지 확인하십시오.',
+    'server limit': '서버 기록 수 제한(1,000개)을 넘었습니다.',
+    'drive limit': '드라이브 기록 수 제한(100,000개)을 넘었습니다.',
+    'certificate limit': '인증서 기록 수 제한(1,000개)을 넘었습니다.',
+    'invalid or limited diagnostic input': 'gzip 압축 또는 JSON 해석에 실패했습니다. 파일이 잘렸거나 손상되었을 수 있습니다.',
+}
+
+
+def describe_input_error(exc, label='입력 파일'):
+    """Return Korean guidance lines for an input failure without echoing input content or paths."""
+    import errno
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if isinstance(exc, PermissionError) or isinstance(exc, OSError) and exc.errno in (errno.EACCES, errno.EPERM):
+            return [label + ' 파일을 읽을 권한이 없습니다.',
+                    '파일 소유자 계정으로 실행하거나, 소유자에게 읽기 가능한 사본을 받아 지정하십시오. 이 도구는 파일 권한을 바꾸지 않습니다.']
+        if isinstance(exc, FileNotFoundError):
+            return [label + ' 파일이 없습니다. 경로와 파일 이름을 확인하십시오.']
+        if isinstance(exc, IsADirectoryError):
+            return [label + ' 경로가 파일이 아니라 디렉터리입니다.']
+        if isinstance(exc, UnicodeError):
+            return [label + '이(가) UTF-8 텍스트가 아닙니다. 원본 gzip(diag-data-*.json.gz)은 --health로 지정하십시오.']
+        message = exc.args[0] if isinstance(exc, InputError) and exc.args and isinstance(exc.args[0], str) else None
+        if message in INPUT_ERROR_HINTS:
+            return [label + ': ' + INPUT_ERROR_HINTS[message]]
+        exc = exc.__cause__ or exc.__context__
+    return [label + ': 형식·인코딩·크기 제한을 확인하십시오.']
+
+
+# ---------------------------------------------------------------- 사람이 읽는 표시(공통)
+MISSING = '미제공 / 미평가'
+STATUS_KO = {'success': '요청 범위 처리 완료(시스템 정상 판정 아님)', 'partial': '부분 분석(자료 부족 항목은 미평가로 남김)'}
+CODE_KO = {
+    # coverage
+    'not_available_from_aggregate': '공식 Markdown에는 통과 검사 상세가 없어 복원하지 않음',
+    'not_supported_in_r1': '이 실행에서 사용하지 않음(공식 Markdown 단독)',
+    'not_supported': '지원하지 않음',
+    'allowlisted_minio_info_subset': '허용 목록의 MinIO 서버·드라이브·TLS 정보만 추출',
+    'indices_only; no quorum or failure-domain inference': 'pool·set 인덱스만 표시, quorum·장애 도메인은 추론하지 않음',
+    'allowlisted_thp_iommu_rlimit': 'THP·IOMMU·rlimit 설정만 추출',
+    'recognized_sys_arrays_only': '인식된 sys 배열의 error/errors 필드만 집계',
+    # parser notes
+    'summary/detail mismatch': '공식 요약 수치와 상세 검사 수가 다름',
+    'check detail not uniquely linked': '검사 표의 행과 상세 절을 1:1로 연결하지 못함',
+    'unmatched detail preserved': '검사 표에 없는 상세 절을 그대로 보존함',
+    'duplicate check ID': '같은 검사 ID가 중복됨',
+    'duplicate summary': 'Summary 줄이 두 번 이상 있음',
+    'check status conflict': '검사 표와 상세 절의 상태가 다름',
+    'unclosed fence': '닫히지 않은 코드 블록이 있음',
+    'unrecognized official status': '알 수 없는 공식 상태 값이 있음',
+    'invalid certificate timestamp': '인증서 시각 형식이 올바르지 않음',
+    'input correspondence evidence insufficient': '두 입력이 같은 대상·시점인지 확인할 증거가 부족함',
+    'reported collector errors; source coverage incomplete': '원본에 수집 오류 기록이 있어 수집 범위가 불완전함',
+    'collection error count incomplete': 'sys.errors 부재 또는 형식 이상 행 때문에 수집 오류 전체 수를 확정하지 못함',
+    'drive array missing': '드라이브 배열이 없는 서버 기록이 있음',
+    'invalid server record': '형식이 올바르지 않은 서버 기록이 있음',
+    'invalid drive record': '형식이 올바르지 않은 드라이브 기록이 있음',
+    'invalid certificate record': '형식이 올바르지 않은 인증서 기록이 있음',
+    # input link
+    'health_only': '원본 gzip 단독(공식 Markdown 미지정)',
+    'consistent_observations': '대상·시각이 허용 범위에서 일치(같은 수집 실행 증명은 아님)',
+    'insufficient_evidence': '대응 증거 부족(제한 결과)',
+    'conflict': '충돌(결합 거부)',
+}
+COVERAGE_LABELS = {'passed_details': '통과 검사 상세', 'health': '원본 gzip(R2)', 'comparison': '스냅숏 비교',
+                   'operational_analysis': '운영 분석', 'topology': '토폴로지', 'configuration': '시스템 설정',
+                   'collection_errors': '수집 오류'}
+
+
+def ko(code):
+    """Korean label with the original code kept for traceability."""
+    if code is None:
+        return MISSING
+    text = CODE_KO.get(str(code))
+    return '%s (%s)' % (text, code) if text else str(code)
+
+
+def summary_text(summary):
+    if not isinstance(summary, dict):
+        return '공식 Markdown 미지정(공식 판정 없음)'
+    total = sum(v for v in summary.values() if isinstance(v, int))
+    return '통과 %s · 오류 %s · 경고 %s (총 %s)' % (summary.get('passed'), summary.get('errors'), summary.get('warnings'), total)
+
+
+def with_kst(value):
+    if not value:
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+    except ValueError:
+        return str(value)
+    if parsed.tzinfo is None:
+        return str(value)
+    return '%s (한국 시각 %s)' % (value, parsed.astimezone(KST).strftime('%Y-%m-%d %H:%M:%S'))
+
+
+def duration_text(seconds):
+    if not isinstance(seconds, int):
+        return None
+    sign = '-' if seconds < 0 else ''
+    return '%s초 (약 %s%.1f일)' % (seconds, sign, abs(seconds) / 86400)
+
+
+RESULT_KO = {'pass': '통과', 'warning': '경고', 'fail': '실패', 'not_evaluated': '미평가', 'assessable': '평가 가능',
+             'unsupported': '해설 미등록', 'insufficient_data': '자료 부족', 'unclassified': '미분류'}
+
+
+def counts_rows(prefix, counts):
+    return [(prefix, RESULT_KO.get(str(k), str(k)), v) for k, v in sorted((counts or {}).items(), key=lambda kv: str(kv[0]))]
+
+
+def info_blocks(report):
+    """Human-readable tables for metadata, facts, summaries and limits (no raw structures)."""
+    meta = report.get('input_metadata') or {}
+    facts = report.get('facts') or {}
+    blocks = [('h', 2, '확인된 정보')]
+    rows = [('입력 형식', '공식 Markdown' if meta.get('format') == 'official_markdown' else meta.get('format') or '원본 gzip 단독'),
+            ('공식 Markdown 수집 시각', with_kst(meta.get('collected_at'))),
+            ('분석 기준 시각', with_kst(meta.get('as_of'))),
+            ('기준 시각 출처', {'explicit': '--as-of 지정', 'collection': '수집 시각'}.get(meta.get('as_of_origin'), meta.get('as_of_origin'))),
+            ('해석기 버전', meta.get('parser_version'))]
+    health = meta.get('health')
+    if isinstance(health, dict):
+        rows += [('원본 gzip 수집 시각', with_kst(health.get('collected_at'))),
+                 ('원본 gzip JSON 문서 수', health.get('documents')),
+                 ('원본 형식 버전(실행을 막지 않음)', health.get('format_version'))]
+    rows += [('인증서 만료 시각', facts.get('certificate_expires_kst') or facts.get('certificate_expires_at')),
+             ('인증서 남은 시간(기준 시각부터)', duration_text(facts.get('certificate_remaining_seconds'))),
+             ('인증서 시각 미확정 사유', facts.get('certificate_time_reason'))]
+    blocks.append(('table', ['항목', '값'], [r for r in rows if not (r[0] == '인증서 시각 미확정 사유' and r[1] is None)]))
+    link = report.get('input_link')
+    if isinstance(link, dict):
+        blocks += [('h', 2, '입력 결합 확인'),
+                   ('table', ['항목', '값'], [
+                       ('결합 상태', ko(link.get('status'))),
+                       ('서버 대상 일치', {True: '일치', False: '불일치 또는 확인 불가'}.get(link.get('targets_match'), MISSING) if 'targets_match' in link else '해당 없음'),
+                       ('수집 시각 차이(초)', (round(link['time_delta_seconds'], 1) if isinstance(link.get('time_delta_seconds'), (int, float)) else None) if 'time_delta_seconds' in link else '해당 없음'),
+                       ('허용 시각 차이(초)', link.get('time_tolerance_seconds') if 'time_tolerance_seconds' in link else '해당 없음'),
+                       ('같은 수집 실행 증명', '아니오(증명하지 않음)'),
+                       ('같은 배포 증명', '아니오(증명하지 않음)')])]
+    summary = report.get('analysis_summary') or {}
+    blocks.append(('h', 2, '자체 해설 요약'))
+    rows = []
+    for key, label in (('priority_counts', '우선순위'), ('category_counts', '영역'), ('assessment_counts', '평가 범위'),
+                       ('custom_rule_counts', '자체 점검 결과')):
+        rows += counts_rows(label, summary.get(key))
+    blocks.append(('table', ['구분', '값', '개수'], rows) if rows else ('p', '집계할 항목이 없습니다.'))
+    catalog = summary.get('custom_rule_catalog')
+    if isinstance(catalog, dict) and catalog:
+        blocks.append(('table', ['자체 점검 규칙', '규칙 버전', '필요 입력', '판정 조건'],
+                       [(rid, c.get('version'), ', '.join(c.get('required_inputs') or []), c.get('condition')) for rid, c in catalog.items()]))
+    blocks += [('h', 2, '입력 버전'),
+               ('table', ['구성요소', '값', '사유'],
+                [(name, ', '.join(v['value']) if isinstance(v.get('value'), list) else v.get('value'), v.get('reason'))
+                 for name, v in (report.get('source_versions') or {}).items() if isinstance(v, dict)])]
+    blocks.append(('h', 2, '한계'))
+    blocks.append(('table', ['범위', '상태'], [(COVERAGE_LABELS.get(k, k), ko(v)) for k, v in (report.get('coverage') or {}).items()]))
+    notes = report.get('parser_errors') or []
+    blocks.append(('p', '해석·결합 주의 사항:'))
+    blocks.append(('ul', [ko(n) for n in notes] or ['없음']))
+    completeness = report.get('completeness') or {}
+    if 'requested_scope_satisfied' in completeness:
+        blocks.append(('p', '요청 범위 충족: ' + ('예' if completeness['requested_scope_satisfied'] else '아니오(미평가·미제공 항목 있음)')))
+    if completeness.get('limitations'):
+        blocks.append(('p', completeness['limitations']))
+    blocks.append(('p', (report.get('masking') or {}).get('limitations', '')))
+    return blocks
+
+
+def blocks_html(blocks):
+    esc = lambda x: html.escape(str(x), quote=True)
+    cell = lambda x: MISSING if x is None else esc(x)
+    out = []
+    for block in blocks:
+        kind = block[0]
+        if kind == 'h':
+            out.append('<h%d>%s</h%d>' % (block[1], esc(block[2]), block[1]))
+        elif kind == 'p':
+            out.append('<p>%s</p>' % esc(block[1]))
+        elif kind == 'kv':
+            out.append('<p>%s<strong>%s</strong></p>' % (esc(block[1]), cell(block[2])))
+        elif kind == 'ul':
+            out.append('<ul>' + ''.join('<li>%s</li>' % esc(x) for x in block[1]) + '</ul>')
+        elif kind == 'table':
+            head = '<tr>' + ''.join('<th>' + esc(x) + '</th>' for x in block[1]) + '</tr>'
+            body = ''.join('<tr>' + ''.join('<td>' + cell(x) + '</td>' for x in row) + '</tr>' for row in block[2])
+            out.append('<div class="table-scroll"><table>' + head + body + '</table></div>')
+        elif kind == 'details':
+            out.append('<details><summary>%s</summary>%s</details>' % (esc(block[1]), blocks_html(block[2])))
+    return ''.join(out)
+
+
+def md_literal(value):
+    # All user-origin text remains inert even in HTML-capable Markdown viewers.
+    return html.escape(str(value)).replace('`', '&#96;').replace('[', '&#91;').replace(']', '&#93;').replace('*', '&#42;').replace('_', '&#95;').replace('|', '&#124;').replace('!', '&#33;')
+
+
+def blocks_markdown(blocks):
+    cell = lambda x: MISSING if x is None else md_literal(x).replace('\r', ' ').replace('\n', ' ')
+    out = []
+    for block in blocks:
+        kind = block[0]
+        if kind == 'h':
+            out += ['#' * block[1] + ' ' + md_literal(block[2]), '']
+        elif kind == 'p':
+            out += [md_literal(block[1]), '']
+        elif kind == 'kv':
+            out += [md_literal(block[1]) + '**' + cell(block[2]) + '**', '']
+        elif kind == 'ul':
+            out += ['- ' + cell(x) for x in block[1]] + ['']
+        elif kind == 'table':
+            out.append('| ' + ' | '.join(cell(x) for x in block[1]) + ' |')
+            out.append('| ' + ' | '.join('---' for _ in block[1]) + ' |')
+            out += ['| ' + ' | '.join(cell(x) for x in row) + ' |' for row in block[2]]
+            out.append('')
+        elif kind == 'details':
+            out += ['#### ' + md_literal(block[1]), ''] + blocks_markdown(block[2]).split('\n')
+    return '\n'.join(out)
 
 
 def cells(line):
@@ -351,15 +598,14 @@ def model(text, mask='strict', as_of=None):
     return report
 
 
-def markdown(report):
-    def literal(value):
-        # All user-origin text remains inert even in HTML-capable Markdown viewers.
-        return html.escape(str(value)).replace('`', '&#96;').replace('[', '&#91;').replace(']', '&#93;').replace('*', '&#42;').replace('_', '&#95;').replace('|', '&#124;').replace('!', '&#33;')
+def markdown(report, extra_blocks=None):
+    literal = md_literal
     out = ['# MinIO AIStor 폐쇄망 진단 보고서', '',
            '도구 버전: ' + report['tool_version'] + ' / 스키마: ' + report['schema_version'],
            '해설 정책: ' + report['policy']['version'] + ' / 환경: ' + report['policy']['profile'], '',
-           '## 공식 요약', '', json.dumps(report['official_summary'], ensure_ascii=False), '',
-           '분석 상태: ' + report['run_status'], '', '통과 상세 부재는 정상 검사 복원을 허용하지 않습니다.', '']
+           '## 공식 요약', '', '공식 판정(mc 보고서): ' + literal(summary_text(report['official_summary'])), '',
+           '분석 상태: ' + report['run_status'] + ' — ' + STATUS_KO.get(report['run_status'], ''), '',
+           '공식 판정과 이 도구의 자체 점검은 별개입니다. 통과 상세 부재는 정상 검사 복원을 허용하지 않습니다.', '']
     for f in report['findings']:
         out.extend(['## ' + literal(f['title']), '', '공식 상태: ' + literal(f['official_status']), '우선순위: ' + f['priority'],
                     '평가 범위: ' + f['assessment'] + ' / ' + f['assessment_reason'], '',
@@ -378,14 +624,11 @@ def markdown(report):
             out.append('')
         if not f['evidence_blocks']:
             out.extend([literal(f['detail']).replace('\n', '\n\n'), ''])
-    out.extend(['## 확인된 정보', '', literal(report['input_metadata']), literal(report['facts']),
-                '', '## 자체 해설 요약', '', literal(report['analysis_summary']),
-                '', '## 입력 버전', '', literal(report['source_versions']),
-                '', '## 한계', '', literal(report['coverage']), literal(report['parser_errors']), literal(report['masking']['limitations']), ''])
+    out.append(blocks_markdown((extra_blocks or []) + info_blocks(report)))
     return '\n'.join(out)
 
 
-def html_report(report):
+def html_report(report, extra_html=''):
     esc = lambda x: html.escape(str(x), quote=True)
     articles = []
     for f in report['findings']:
@@ -415,18 +658,17 @@ summary{cursor:pointer}summary:focus-visible,input:focus-visible,select:focus-vi
 .table-scroll{overflow-x:auto}table{border-collapse:collapse}th,td{border:1px solid #bbb;padding:8px;text-align:left}
 @media(max-width:480px){body{padding:16px}h1{font-size:24px}}
 @media print{.filters{display:none}article{break-inside:avoid}}
-</style><h1>MinIO AIStor 폐쇄망 진단 보고서</h1><p>도구·스키마·정책: %s</p><p>상태: %s</p><p>공식 요약: %s</p>
+</style><h1>MinIO AIStor 폐쇄망 진단 보고서</h1><p>도구·스키마·정책: %s</p><p>상태: %s</p><p>%s</p>
 <p>통과 상세는 복원하지 않습니다. 현재 서비스 상태의 실시간 검증이 아닙니다.</p>
 <div class="filters"><label>검색 <input id="q" type="search"></label>
 <label>공식 상태 <select id="s"><option value="">전체</option><option>error</option><option>warning</option><option>passed</option></select></label>
 <label>우선순위 <select id="p"><option value="">전체</option><option>P1</option><option>P2</option><option>P3</option><option>P4</option><option>unclassified</option></select></label>
 <label>영역 <select id="c"><option value="">전체</option><option>가용성</option><option>설정</option><option>보안</option><option>미분류</option></select></label></div>
-%s<h2>분석 한계·입력 버전·자체 해설 요약</h2><pre>%s</pre><p>%s</p>
+%s%s%s
 <script>'use strict';function filter(){const q=document.getElementById('q').value.toLowerCase(),s=document.getElementById('s').value,p=document.getElementById('p').value,c=document.getElementById('c').value;document.querySelectorAll('article').forEach(a=>{a.hidden=!(a.textContent.toLowerCase().includes(q)&&(!s||a.dataset.status===s)&&(!p||a.dataset.priority===p)&&(!c||a.dataset.category===c));});}document.getElementById('q').addEventListener('input',filter);document.getElementById('s').addEventListener('change',filter);document.getElementById('p').addEventListener('change',filter);document.getElementById('c').addEventListener('change',filter);</script></html>''' % (
         esc(report['tool_version'] + ' / ' + report['schema_version'] + ' / ' + report['policy']['version']),
-        esc(report['run_status']), esc(json.dumps(report['official_summary'], ensure_ascii=False)), ''.join(articles),
-        esc(json.dumps({key: report[key] for key in ('input_metadata', 'source_versions', 'analysis_summary', 'coverage', 'parser_errors', 'facts')}, ensure_ascii=False, indent=2)),
-        esc(report['masking']['limitations']))
+        esc(report['run_status'] + ' — ' + STATUS_KO.get(report['run_status'], '')), esc('공식 판정(mc 보고서) ' + summary_text(report['official_summary'])), ''.join(articles),
+        extra_html, blocks_html(info_blocks(report)))
 
 
 def require_private(path, directory=False):
@@ -523,6 +765,15 @@ def save(report, out_dir, force=False, *, renderers=None):
         os.close(fd)
 
 
+def result_summary_line(report):
+    custom = (report.get('analysis_summary') or {}).get('custom_rule_counts')
+    line = '요약: 공식 판정 ' + summary_text(report.get('official_summary'))
+    if isinstance(custom, dict):
+        names = {'pass': '통과', 'warning': '경고', 'not_evaluated': '미평가'}
+        line += ' / 자체 점검 ' + ' · '.join('%s %s' % (names.get(k, k), v) for k, v in sorted(custom.items(), key=lambda kv: (list(names).index(kv[0]) if kv[0] in names else 9, str(kv[0]))))
+    return line + ' / 분석 상태 ' + str(report.get('run_status'))
+
+
 def main(argv=None, *, default_out_dir=None):
     parser = argparse.ArgumentParser(description='AIStor R1 offline Markdown analyzer')
     parser.add_argument('--official-report', type=Path)
@@ -550,8 +801,10 @@ def main(argv=None, *, default_out_dir=None):
             raise InputError('input limit exceeded')
         text = data.decode('utf-8-sig')
         report = model(text, args.mask, args.as_of)
-    except (InputError, OSError, UnicodeError):
+    except (InputError, OSError, UnicodeError) as exc:
         print('입력 오류: 필수 형식·인코딩·경로·제한을 확인하십시오.', file=sys.stderr)
+        for line in describe_input_error(exc, '공식 Markdown(--official-report)'):
+            print('  - ' + line, file=sys.stderr)
         return 2
     except OutputError:
         print('마스킹 검증 실패: 결과를 출력하지 않았습니다.', file=sys.stderr)
@@ -567,6 +820,7 @@ def main(argv=None, *, default_out_dir=None):
                 raise OutputError('input/output collision')
             generation = save(report, args.out_dir, args.force)
             print('결과 세트 확정: ' + str(generation))
+            print(result_summary_line(report))
         except (OutputError, OSError):
             print('출력 실패: 경로·충돌·접근권한을 확인하십시오. 기존 확정 결과를 보존합니다.', file=sys.stderr)
             return 3
