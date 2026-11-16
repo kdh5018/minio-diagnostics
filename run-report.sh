@@ -27,10 +27,7 @@ err() { printf '%s\n' "$*" >&2; }
 die() {
     local code=$1
     shift
-    local line
-    for line in "$@"; do
-        err "$line"
-    done
+    printf '%s\n' "$@" >&2
     exit "$code"
 }
 
@@ -151,7 +148,6 @@ HEALTH=
 OUT_DIR=
 OUT_DIR_SET=0
 MASK=
-MASK_SET=0
 AS_OF=
 LANG_OPT=
 FAIL_ON=
@@ -177,8 +173,8 @@ while [ $# -gt 0 ]; do
         --health=*) HEALTH=${1#*=}; shift ;;
         --out-dir) need_value "$1" $#; OUT_DIR=$2; OUT_DIR_SET=1; shift 2 ;;
         --out-dir=*) OUT_DIR=${1#*=}; OUT_DIR_SET=1; shift ;;
-        --mask) need_value "$1" $#; MASK=$2; MASK_SET=1; shift 2 ;;
-        --mask=*) MASK=${1#*=}; MASK_SET=1; shift ;;
+        --mask) need_value "$1" $#; MASK=$2; shift 2 ;;
+        --mask=*) MASK=${1#*=}; shift ;;
         --as-of) need_value "$1" $#; AS_OF=$2; shift 2 ;;
         --as-of=*) AS_OF=${1#*=}; shift ;;
         --lang) need_value "$1" $#; LANG_OPT=$2; shift 2 ;;
@@ -212,11 +208,8 @@ if [ "$CHECK_ONLY" -eq 0 ] && [ -z "$REPORT" ] && [ -z "$HEALTH" ]; then
         "도움말: run-report.sh --help"
 fi
 
-if [ -n "$HEALTH" ]; then
-    MODE=R2
-else
-    MODE=R1
-fi
+MODE=R1
+[ -z "$HEALTH" ] || MODE=R2
 # 0.4.0부터 --lang, --fail-on-priority, --mask는 R1·R2 공통이다.
 case $LANG_OPT in ''|ko) ;; *) die "$EXIT_USAGE" "사용법 오류: --lang은 ko만 지원합니다." ;; esac
 case $FAIL_ON in ''|P1|P2|P3|P4) ;; *) die "$EXIT_USAGE" "사용법 오류: --fail-on-priority는 P1·P2·P3·P4 중 하나입니다." ;; esac
@@ -288,7 +281,6 @@ word_in() {
 
 read_os_release() {
     OS_ID=
-    OS_ID_LIKE=
     OS_VERSION_ID=
     OS_PRETTY=
     local file=/etc/os-release
@@ -302,7 +294,6 @@ read_os_release() {
         value=${value#\'}
         case $key in
             ID) OS_ID=$value ;;
-            ID_LIKE) OS_ID_LIKE=$value ;;
             VERSION_ID) OS_VERSION_ID=$value ;;
             PRETTY_NAME) OS_PRETTY=$value ;;
         esac
@@ -556,9 +547,7 @@ check_output
 
 if [ "$CHECK_ONLY" -eq 1 ]; then
     say "사전 점검 통과 (분석은 실행하지 않음)"
-    for line in "${CHECK_LINES[@]}"; do
-        say "  - $line"
-    done
+    printf '  - %s\n' "${CHECK_LINES[@]}"
     exit 0
 fi
 
@@ -576,9 +565,7 @@ args+=("--out-dir=$OUT_DIR" "--mask=$MASK")
 [ -z "$FAIL_ON" ] || args+=("--fail-on-priority=$FAIL_ON")
 
 say "[$MODE] 분석 시작 (네트워크·설치 없음)"
-for line in "${CHECK_LINES[@]}"; do
-    say "  - $line"
-done
+printf '  - %s\n' "${CHECK_LINES[@]}"
 
 output=$("$PY" -E -s -B -X utf8 "${args[@]}")
 rc=$?

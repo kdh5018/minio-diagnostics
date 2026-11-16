@@ -31,7 +31,6 @@ readonly APP_FILES=(analyze.py aistordoctor.py r2_health.py r2_enrichment.py)
 readonly REQUIRED_RUNTIME_LICENSES=(LICENSE.cpython.txt LICENSE.openssl-3.txt LICENSE.zlib.txt
     LICENSE.libffi.txt LICENSE.sqlite.txt LICENSE.expat.txt LICENSE.bzip2.txt LICENSE.liblzma.txt
     LICENSE.mpdecimal.txt)
-readonly LICENSE_STATUS_VALUE=proprietary
 
 ROOT=$(cd -P -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" && pwd -P)
 
@@ -229,6 +228,18 @@ R1_VERSION=$(sed -n "s/^VERSION = '\(.*\)'.*/\1/p" "$ROOT/aistordoctor.py" | hea
 R2_VERSION=$(sed -n "s/^VERSION = '\(.*\)'.*/\1/p" "$ROOT/r2_health.py" | head -n 1)
 
 # ---------------------------------------------------------------- 런타임 확보
+fetch() {  # fetch <url> <파일> <표시 접두어> <curl·wget이 없을 때 안내>
+    local tmp=$2.part
+    echo "${3}내려받기(개발 환경): $1"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fL --retry 3 -o "$tmp" "$1"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -O "$tmp" "$1"
+    else
+        die "curl·wget이 없습니다. $4"
+    fi
+    mv -f -- "$tmp" "$2"
+}
 RUNTIME_SHA256=${RUNTIME_SHA256_OVERRIDE:-$RUNTIME_SHA256_PINNED}
 case $RUNTIME_SHA256 in
     [0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;;
@@ -237,17 +248,9 @@ esac
 if [ -z "$RUNTIME_ARCHIVE" ]; then
     mkdir -p -- "$CACHE_DIR"
     RUNTIME_ARCHIVE=$CACHE_DIR/$RUNTIME_FILE
+    # if 안에서 호출해 set -e가 내려받기 실패에서 바로 멈추게 한다.
     if [ ! -f "$RUNTIME_ARCHIVE" ]; then
-        echo "런타임 내려받기(개발 환경): $RUNTIME_URL"
-        tmp_dl=$RUNTIME_ARCHIVE.part
-        if command -v curl >/dev/null 2>&1; then
-            curl -fL --retry 3 -o "$tmp_dl" "$RUNTIME_URL"
-        elif command -v wget >/dev/null 2>&1; then
-            wget -O "$tmp_dl" "$RUNTIME_URL"
-        else
-            die "curl·wget이 없습니다. --runtime-archive로 미리 받은 파일을 지정하십시오."
-        fi
-        mv -f -- "$tmp_dl" "$RUNTIME_ARCHIVE"
+        fetch "$RUNTIME_URL" "$RUNTIME_ARCHIVE" '런타임 ' '--runtime-archive로 미리 받은 파일을 지정하십시오.'
     fi
 fi
 [ -f "$RUNTIME_ARCHIVE" ] || die "런타임 파일이 없습니다: $RUNTIME_ARCHIVE"
@@ -258,18 +261,6 @@ echo "런타임 확인: $(basename -- "$RUNTIME_ARCHIVE") sha256=$actual"
 [ -f "$ROOT/LICENSE" ] || die "저장소 최상위 LICENSE 파일이 없습니다."
 
 # ---------------------------------------------------------------- 제3자 라이선스 원문 확보
-fetch() {  # fetch <url> <파일>
-    local tmp=$2.part
-    echo "내려받기(개발 환경): $1"
-    if command -v curl >/dev/null 2>&1; then
-        curl -fL --retry 3 -o "$tmp" "$1"
-    elif command -v wget >/dev/null 2>&1; then
-        wget -O "$tmp" "$1"
-    else
-        die "curl·wget이 없습니다. 미리 받은 파일을 옵션으로 지정하십시오."
-    fi
-    mv -f -- "$tmp" "$2"
-}
 # zstd 해제: zstd → unzstd → zstdcat → Python zstandard 모듈 → Python 3.14+ compression.zstd 순서로 찾는다.
 PY_ZSTD_EXTRACT='
 import sys, tarfile
@@ -323,7 +314,8 @@ verify_licenses() {  # verify_licenses <디렉터리> <full 배포판 SHA-256>
 }
 
 LICENSE_WORK=$(mktemp -d "${TMPDIR:-/tmp}/aistor-lic.XXXXXX")
-trap 'rm -rf -- "$LICENSE_WORK"' EXIT
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/aistor-build.XXXXXX")
+trap 'rm -rf -- "$WORK" "$LICENSE_WORK"' EXIT
 case ${LICENSE_SHA256_PINNED:-} in
     [0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;;
     *) [ -n "$LICENSE_DIR" ] && [ "$ALLOW_UNVERIFIED_LICENSES" -eq 1 ] ||
@@ -337,7 +329,7 @@ else
     if [ -z "$LICENSE_ARCHIVE" ]; then
         mkdir -p -- "$CACHE_DIR"
         LICENSE_ARCHIVE=$CACHE_DIR/$LICENSE_FILE
-        [ -f "$LICENSE_ARCHIVE" ] || fetch "$LICENSE_URL" "$LICENSE_ARCHIVE"
+        [ -f "$LICENSE_ARCHIVE" ] || fetch "$LICENSE_URL" "$LICENSE_ARCHIVE" '' '미리 받은 파일을 옵션으로 지정하십시오.'
     fi
     [ -f "$LICENSE_ARCHIVE" ] || die "라이선스 원문 출처 파일이 없습니다: $LICENSE_ARCHIVE"
     actual=$(sha256sum -- "$LICENSE_ARCHIVE" | cut -d' ' -f1)
@@ -362,8 +354,6 @@ echo "제3자 라이선스 원문: $(cd -- "$LICENSE_SRC" && ls LICENSE.*.txt | 
 
 # ---------------------------------------------------------------- 스테이징
 BUNDLE=$PACKAGE_NAME-$PACKAGE_VERSION-$TARGET_ID
-WORK=$(mktemp -d "${TMPDIR:-/tmp}/aistor-build.XXXXXX")
-trap 'rm -rf -- "$WORK" "$LICENSE_WORK"' EXIT
 STAGE=$WORK/$BUNDLE
 mkdir -p -- "$STAGE/app" "$STAGE/runtime" "$STAGE/licenses/third-party"
 
@@ -433,7 +423,7 @@ R2_TOOL_VERSION=$R2_VERSION
 SOURCE_COMMIT=$SOURCE_COMMIT
 SOURCE_DIRTY=$SOURCE_DIRTY
 BUILD_DATE=$BUILD_DATE
-LICENSE_STATUS=$LICENSE_STATUS_VALUE
+LICENSE_STATUS=proprietary
 LICENSE=Proprietary - Copyright (c) 2026 WNYTech. All rights reserved. (internal and customer use only)
 THIRD_PARTY_LICENSE_SOURCE=python-build-standalone $PBS_RELEASE $LICENSE_ORIGIN
 THIRD_PARTY_LICENSE_VERIFIED=$LICENSE_VERIFIED
