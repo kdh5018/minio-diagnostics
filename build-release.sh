@@ -493,8 +493,9 @@ Python 런타임이 동봉되어 있습니다. 인터넷·SUBNET·MinIO 서버�
   tar -xzf $BUNDLE.tar.gz && cd $BUNDLE        # 실행 가능한 위치(예: 홈)에 해제, noexec 위치 불가
   - 압축 해제에 tar·gzip이 필요합니다(최소 설치 이미지에는 없을 수 있음). 없으면 다른 서버에서 풀어
     폴더째 복사하십시오. 읽기 전용 위치에 둔 폴더에서도 실행됩니다.
-  - ./run-report.sh가 "Permission denied"(종료 126)로 바로 끝나면 해제 위치가 noexec입니다.
-    홈 등 실행 가능한 위치에 다시 해제하십시오.
+  - ./run-report.sh가 "Permission denied"(종료 126)로 바로 끝나면 해제 위치가 noexec이거나, SELinux
+    제한 사용자(user_u)에 user_exec_content=off인 경우입니다(감사 로그에 남지 않을 수 있음).
+    홈 등 실행 가능한 위치에 다시 해제하거나 실행이 허용된 계정을 쓰십시오.
   - SELinux enforcing(targeted 기본 정책)에서 별도 설정 없이 동작합니다. 정책·boolean을 바꾸지 마십시오.
   - 저장 위치는 권한 700을 지킬 수 있는 파일시스템이어야 합니다. Windows 공유 폴더처럼 권한이
     적용되지 않는 곳은 저장을 거부합니다(종료 코드 3).
