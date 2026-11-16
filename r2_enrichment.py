@@ -16,6 +16,21 @@ def endpoint(value):
     return value.lower() if re.fullmatch(r'(?:[A-Za-z0-9_.-]+|\[[0-9A-Fa-f:]+\]):[0-9]{1,5}', value) else None
 
 
+def server_targets(body):
+    """Internal endpoint -> server alias map; endpoints never leave this module."""
+    servers = body.get('minio', {}).get('info', {}).get('servers', [])
+    return {endpoint(s.get('endpoint')): 'server-%04d' % (i + 1) for i, s in enumerate(servers) if isinstance(s, dict) and endpoint(s.get('endpoint'))}
+
+
+def rule(rid, version, result, reason, title, category, required, condition, path, basis):
+    """One custom-rule result record (shared by R2 health and system rules)."""
+    return {'id': rid, 'rule_id': rid, 'rule_version': version, 'source_check_id': None,
+            'origin': 'custom_rule', 'official_status': None, 'official_status_reason': 'not_applicable',
+            'rule_result': result, 'assessment': 'assessable' if result else 'insufficient_data', 'reason': reason,
+            'title': title, 'category': category, 'required_inputs': required, 'condition': condition,
+            'source_locator': {'input': 'health-001', 'json_path': path}, 'basis': basis}
+
+
 def active_thp(value):
     if not isinstance(value, str):
         return None
@@ -48,8 +63,7 @@ def classify_error(value):
 
 def extract(body, normalized, number):
     sys = body.get('sys') if isinstance(body.get('sys'), dict) else {}
-    raw_servers = body.get('minio', {}).get('info', {}).get('servers', [])
-    targets = {endpoint(s.get('endpoint')): 'server-%04d' % (i + 1) for i, s in enumerate(raw_servers) if isinstance(s, dict) and endpoint(s.get('endpoint'))}
+    targets = server_targets(body)
     configs = sys.get('config')
     configurations = []
     if isinstance(configs, list):
@@ -128,8 +142,7 @@ def link(body, official_text, stamp):
                 for i in columns:
                     if i < len(row) and endpoint(row[i]):
                         found.add(endpoint(row[i]))
-    servers = body.get('minio', {}).get('info', {}).get('servers', [])
-    targets = {endpoint(s.get('endpoint')) for s in servers if isinstance(s, dict) and endpoint(s.get('endpoint'))}
+    targets = set(server_targets(body))
     raw_time = stamp(body.get('timestamp'))
     delta = (collected - raw_time).total_seconds() if collected and raw_time else None
     targets_match = bool(found and targets) and found == targets
@@ -173,11 +186,7 @@ def system_rules(n):
     configurations = n['system_configurations']
     rules = []
     def add(rid, title, result, reason, required, condition, path, version='r2-system-1'):
-        rules.append({'id': rid, 'rule_id': rid, 'rule_version': version, 'source_check_id': None,
-            'origin': 'custom_rule', 'official_status': None, 'official_status_reason': 'not_applicable',
-            'rule_result': result, 'assessment': 'assessable' if result else 'insufficient_data', 'reason': reason,
-            'title': title, 'category': '설정', 'required_inputs': required, 'condition': condition,
-            'source_locator': {'input': 'health-001', 'json_path': path}, 'basis': n['collected_at']})
+        rules.append(rule(rid, version, result, reason, title, '설정', required, condition, path, n['collected_at']))
     result, reason = thp_result(configurations)
     add('r2.thp.mode', 'THP 설정과 공식 권장값 비교(자체 점검)', result, reason,
         ['sys.config.thp-config.enabled', 'sys.config.thp-config.defrag', 'sys.config.thp-config.max_ptes_none'],

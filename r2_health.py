@@ -2,7 +2,6 @@
 import argparse
 from collections import Counter
 import copy
-import datetime as dt
 import gzip
 import io
 import json
@@ -138,11 +137,7 @@ def number(value):
 def stamp(value):
     if not isinstance(value, str) or len(value) > 100:
         return None
-    try:
-        parsed = dt.datetime.fromisoformat(value.replace('Z', '+00:00'))
-        return parsed if parsed.tzinfo is not None else None
-    except ValueError:
-        return None
+    return a.aware_time(value)
 
 
 def release(value):
@@ -250,12 +245,8 @@ def evaluate(n, as_of=None):
                     reason = 'collection_or_explicit_as_of_basis'
         except (ValueError, TypeError, KeyError):
             reason = 'isolated_rule_error'
-        results.append({'id': rid, 'rule_id': rid, 'rule_version': 'r2-initial-1', 'source_check_id': None,
-                        'origin': 'custom_rule', 'official_status': None, 'official_status_reason': 'not_applicable',
-                        'rule_result': result, 'assessment': 'assessable' if result else 'insufficient_data',
-                        'reason': reason, 'title': title, 'category': category, 'required_inputs': required,
-                        'condition': condition, 'source_locator': {'input': 'health-001', 'json_path': '$.minio.info'},
-                        'basis': basis.isoformat() if basis else None})
+        results.append(enrichment.rule(rid, 'r2-initial-1', result, reason, title, category, required, condition,
+                                       '$.minio.info', basis.isoformat() if basis else None))
     return results
 
 
@@ -398,7 +389,7 @@ def observation_blocks(r):
     link = r.get('input_link') or {}
     blocks.append(('details', '수집 범위·미지원·결합 제한', [
         ('table', ['항목', '값'], [('수집 오류 집계 범위', '인식된 sys 배열의 error/errors 필드만 집계(부재가 전체 수집 성공을 증명하지 않음)'),
-                                  ('입력 결합 상태', a.ko(link.get('status'))),
+                                  ('입력 결합 상태', a.label(link.get('status'))),
                                   ('같은 수집 실행 증명', '아니오'),
                                   ('토폴로지', 'pool·set 인덱스만 표시, quorum·장애 도메인 미추론')])]))
     return blocks
@@ -415,7 +406,7 @@ def html_report(r):
     body = body.replace('<div class="filters">', observations_html(r) + '<div class="filters">', 1)
     # 필터 값(value)은 data-status와 같은 원래 문자열, 보이는 글자는 한국어로 둔다.
     labels = sorted({(f['official_status'], a.status_text(f)) for f in v['findings'] if f['origin'] == 'custom_rule'})
-    options = ''.join('<option value="%s">%s</option>' % (a.html.escape(value, quote=True), a.html.escape(text))
+    options = ''.join('<option value="%s">%s</option>' % (a.esc(value), a.esc(text))
                       for value, text in labels)
     passed = '<option value="passed">통과 (passed)</option>'
     body = body.replace(passed, passed + options)
@@ -440,18 +431,18 @@ def main(argv=None):
     parser.add_argument('--force', action='store_true')
     parser.add_argument('--allow-partial', action='store_true')
     args = parser.parse_args(argv)
+    markdown_stage = False
     try:
-        text_stage = [False]
         body, count = read(args.health)
         text = None
         if args.official_report:
-            text_stage[0] = True
+            markdown_stage = True
             with args.official_report.open('rb') as stream:
                 raw = stream.read(a.MAX_BYTES + 1)
             if len(raw) > a.MAX_BYTES:
                 raise a.InputError('Markdown limit')
             text = raw.decode('utf-8-sig')
-            text_stage[0] = False
+            markdown_stage = False
         r = report(body, count, text, args.as_of, args.mask)
     except LinkConflict as exc:
         print('R2 입력 오류: 결합 거부', file=sys.stderr)
@@ -460,7 +451,6 @@ def main(argv=None):
         return 2
     except (a.InputError, OSError, UnicodeError, ValueError, TypeError, KeyError) as exc:
         print('R2 입력 오류: 형식·제한·필수 구조를 확인하십시오.', file=sys.stderr)
-        markdown_stage = text_stage[0]
         for line in a.describe_input_error(exc, '공식 Markdown(--official-report)' if markdown_stage else '원본 gzip(--health)'):
             print('  - ' + line, file=sys.stderr)
         return 2

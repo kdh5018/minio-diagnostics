@@ -4,6 +4,7 @@ R2 health and R3/R4 analysis are deliberately not implemented in R1.
 import argparse
 from collections import Counter
 import datetime as dt
+import errno
 import hashlib
 import html
 import ipaddress
@@ -74,7 +75,6 @@ INPUT_ERROR_HINTS = {
 
 def describe_input_error(exc, label='입력 파일'):
     """Return Korean guidance lines for an input failure without echoing input content or paths."""
-    import errno
     seen = set()
     while exc is not None and id(exc) not in seen:
         seen.add(id(exc))
@@ -134,14 +134,6 @@ COVERAGE_LABELS = {'passed_details': '통과 검사 상세', 'health': '원본 g
                    'collection_errors': '수집 오류'}
 
 
-def ko(code):
-    """Korean label with the original code kept for traceability."""
-    if code is None:
-        return MISSING
-    text = CODE_KO.get(str(code))
-    return '%s (%s)' % (text, code) if text else str(code)
-
-
 def summary_text(summary):
     if not isinstance(summary, dict):
         return '공식 Markdown 미지정(공식 판정 없음)'
@@ -149,14 +141,20 @@ def summary_text(summary):
     return '통과 %s · 오류 %s · 경고 %s (총 %s)' % (summary.get('passed'), summary.get('errors'), summary.get('warnings'), total)
 
 
-def with_kst(value):
-    if not value:
-        return None
+def aware_time(value):
+    """ISO 8601 time with a timezone (Z accepted), else None."""
     try:
         parsed = dt.datetime.fromisoformat(str(value).replace('Z', '+00:00'))
     except ValueError:
-        return str(value)
-    if parsed.tzinfo is None:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
+def with_kst(value):
+    if not value:
+        return None
+    parsed = aware_time(value)
+    if parsed is None:
         return str(value)
     return '%s (한국 시각 %s)' % (value, parsed.astimezone(KST).strftime('%Y-%m-%d %H:%M:%S'))
 
@@ -206,6 +204,9 @@ def result_text(result):
     return RESULT_KO.get(str(result), str(result)) if result is not None else '미평가'
 
 
+APPROVAL_KO = {True: '필요', False: '불필요', None: '미정'}
+
+
 def status_text(finding):
     """Visible status. Custom rules have no official status; their own result is shown in Korean."""
     if finding.get('origin') == 'custom_rule':
@@ -228,13 +229,8 @@ RESULT_KO = {'pass': '통과', 'warning': '경고', 'fail': '실패', 'not_evalu
 
 def render_time_remaining(expires_at):
     """Remaining time measured at report generation, so an already expired certificate is not read as valid."""
-    if not expires_at:
-        return None
-    try:
-        expiry = dt.datetime.fromisoformat(str(expires_at).replace('Z', '+00:00'))
-    except ValueError:
-        return None
-    if expiry.tzinfo is None:
+    expiry = aware_time(expires_at) if expires_at else None
+    if expiry is None:
         return None
     now = now_utc()
     seconds = int((expiry - now).total_seconds())
@@ -274,7 +270,7 @@ def info_blocks(report):
     if isinstance(link, dict):
         blocks += [('h', 2, '입력 결합 확인'),
                    ('table', ['항목', '값'], [
-                       ('결합 상태', ko(link.get('status'))),
+                       ('결합 상태', label(link.get('status'))),
                        ('서버 대상 일치', {True: '일치', False: '불일치 또는 확인 불가'}.get(link.get('targets_match'), MISSING) if 'targets_match' in link else '해당 없음'),
                        ('수집 시각 차이(초)', (round(link['time_delta_seconds'], 1) if isinstance(link.get('time_delta_seconds'), (int, float)) else None) if 'time_delta_seconds' in link else '해당 없음'),
                        ('허용 시각 차이(초)', link.get('time_tolerance_seconds') if 'time_tolerance_seconds' in link else '해당 없음'),
@@ -296,10 +292,10 @@ def info_blocks(report):
                 [(name, ', '.join(v['value']) if isinstance(v.get('value'), list) else v.get('value'), label(v.get('reason')))
                  for name, v in (report.get('source_versions') or {}).items() if isinstance(v, dict)])]
     blocks.append(('h', 2, '한계'))
-    blocks.append(('table', ['범위', '상태'], [(COVERAGE_LABELS.get(k, k), ko(v)) for k, v in (report.get('coverage') or {}).items()]))
+    blocks.append(('table', ['범위', '상태'], [(COVERAGE_LABELS.get(k, k), label(v)) for k, v in (report.get('coverage') or {}).items()]))
     notes = report.get('parser_errors') or []
     blocks.append(('p', '해석·결합 주의 사항:'))
-    blocks.append(('ul', [ko(n) for n in notes] or ['없음']))
+    blocks.append(('ul', [label(n) for n in notes] or ['없음']))
     completeness = report.get('completeness') or {}
     if 'requested_scope_satisfied' in completeness:
         blocks.append(('p', '요청 범위 충족: ' + ('예' if completeness['requested_scope_satisfied'] else '아니오(미평가·미제공 항목 있음)')))
@@ -309,8 +305,11 @@ def info_blocks(report):
     return blocks
 
 
+def esc(x):
+    return html.escape(str(x), quote=True)
+
+
 def blocks_html(blocks):
-    esc = lambda x: html.escape(str(x), quote=True)
     cell = lambda x: MISSING if x is None else esc(x)
     out = []
     for block in blocks:
@@ -454,6 +453,14 @@ def cells(line):
     return [x.strip().replace('\\|', '|') for x in re.split(r'(?<!\\)\|', line.strip().strip('|'))]
 
 
+LIST_ITEM = re.compile(r'^\s*(?:[-*+] |\d+[.)] )')
+
+
+def closes_fence(fence, line):
+    """A closing fence uses the opening character at least as many times."""
+    return re.fullmatch(r'\s*' + re.escape(fence[0]) + '{' + str(len(fence)) + r',}\s*', line)
+
+
 def evidence_blocks(lines, start_line):
     """Normalize the supported Markdown blocks without interpreting their content."""
     blocks, section, position = [], 'unlabelled', 0
@@ -472,8 +479,7 @@ def evidence_blocks(lines, start_line):
         if fence:
             position += 1
             content = []
-            close = r'\s*' + re.escape(fence[1][0]) + '{' + str(len(fence[1])) + r',}\s*'
-            while position < len(lines) and not re.fullmatch(close, lines[position]):
+            while position < len(lines) and not closes_fence(fence[1], lines[position]):
                 content.append(lines[position])
                 position += 1
             closed = position < len(lines)
@@ -488,14 +494,14 @@ def evidence_blocks(lines, start_line):
             block = {'type': 'table', 'headers': table[0] if has_header else [],
                      'rows': table[2:] if has_header else table}
         else:
-            kind = 'list' if re.match(r'^\s*(?:[-*+] |\d+[.)] )', line) else 'text'
+            kind = 'list' if LIST_ITEM.match(line) else 'text'
             content = [line]
             position += 1
             while position < len(lines) and lines[position].strip():
                 next_line = lines[position]
                 if re.match(r'^\s*(?:`{3,}|~{3,}|\||(?:\*\*)?(?:Info|Resolution):)', next_line, re.I):
                     break
-                next_kind = 'list' if re.match(r'^\s*(?:[-*+] |\d+[.)] )', next_line) else 'text'
+                next_kind = 'list' if LIST_ITEM.match(next_line) else 'text'
                 if next_kind != kind:
                     break
                 content.append(next_line)
@@ -511,17 +517,19 @@ def evidence_blocks(lines, start_line):
 def parse_report(text):
     deadline = time.monotonic() + MAX_PROCESS_SECONDS
     text = text.lstrip('\ufeff').replace('\r\n', '\n').replace('\r', '\n')
-    if len(text.encode('utf-8')) > MAX_BYTES or len(text.splitlines()) > MAX_LINES:
+    raw_lines = text.splitlines()
+    if len(text.encode('utf-8')) > MAX_BYTES or len(raw_lines) > MAX_LINES:
         raise InputError('input limit exceeded')
     visible, fenced = [], False
-    for n, line in enumerate(text.splitlines(), 1):
+    for n, line in enumerate(raw_lines, 1):
         if time.monotonic() > deadline:
             raise InputError('processing time limit exceeded')
-        if re.match(r'^\s*(`{3,}|~{3,})', line):
+        opener = re.match(r'^\s*(`{3,}|~{3,})', line)
+        if opener:
             if not fenced:
-                fence = re.match(r'^\s*(`{3,}|~{3,})', line).group(1)
+                fence = opener[1]
                 fenced = True
-            elif re.fullmatch(r'\s*' + re.escape(fence[0]) + '{' + str(len(fence)) + r',}\s*', line):
+            elif closes_fence(fence, line):
                 fenced = False
             continue
         if not fenced:
@@ -548,12 +556,7 @@ def parse_report(text):
                 try:
                     collected = dt.datetime.strptime(raw, '%a, %d %b %Y %H:%M:%S UTC').replace(tzinfo=dt.timezone.utc)
                 except ValueError:
-                    try:
-                        collected = dt.datetime.fromisoformat(raw.replace('Z', '+00:00'))
-                        if collected.tzinfo is None:
-                            collected = None
-                    except ValueError:
-                        collected = None
+                    collected = aware_time(raw)
         if section in ('errors', 'checks', 'failed checks summary') and line.strip().startswith('|'):
             row = cells(line)
             if 'Check' in row and 'Status' in row:
@@ -575,7 +578,6 @@ def parse_report(text):
         raise InputError('check limit exceeded')
     if (summary['errors'] or summary['warnings']) and not rows:
         raise InputError('required check table missing')
-    raw_lines = text.splitlines()
     for i, detail in enumerate(details):
         end = details[i + 1]['line'] - 1 if i + 1 < len(details) else len(raw_lines)
         later_sections = [n - 1 for n, line in visible if n > detail['line'] and re.match(r'^##\s+', line)]
@@ -702,15 +704,9 @@ class Masker:
 def model(text, mask='strict', as_of=None):
     started = time.monotonic()
     summary, collected, checks, notes = parse_report(text)
-    if as_of:
-        try:
-            basis = dt.datetime.fromisoformat(as_of.replace('Z', '+00:00'))
-            if basis.tzinfo is None:
-                raise ValueError()
-        except ValueError:
-            raise InputError('as-of must include timezone') from None
-    else:
-        basis = collected
+    basis = aware_time(as_of) if as_of else collected
+    if as_of and basis is None:
+        raise InputError('as-of must include timezone')
     explain = {
         'minio.cluster.min': ('가용성', 'P3', '검사 기준과 운영 권고를 구분하십시오. 물리 호스트·Erasure Set·패리티 없이 장애 허용 수를 계산할 수 없습니다.'),
         'sys.mem.iommu': ('설정', 'unclassified', '부팅 옵션의 검사 불일치이며 실제 I/O 장애를 확정하지 않습니다. 호스트·배포 방식과 영향을 확인하고 변경은 별도 승인하십시오.'),
@@ -820,7 +816,7 @@ def markdown(report, extra_blocks=None):
                     '우선순위: ' + md_inline(priority_text(f['priority'])) + '  ',
                     '평가 범위: ' + md_inline(assessment_text(f)), '',
                     md_text(f['observed']), '', md_text(f['recommendation']), '', md_text(f['impact']), '',
-                    '변경 승인: ' + {True: '필요', False: '불필요', None: '미정'}[f['approval_required']], '',
+                    '변경 승인: ' + APPROVAL_KO[f['approval_required']], '',
                     '### 재확인 절차', '', *['- ' + md_inline(step) for step in f['verification_steps']], '',
                     '### 원본 근거(마스킹)', ''])
         for block in f['evidence_blocks']:
@@ -834,23 +830,20 @@ def markdown(report, extra_blocks=None):
 
 
 def html_report(report, extra_html=''):
-    esc = lambda x: html.escape(str(x), quote=True)
     articles = []
     for f in report['findings']:
         evidence = []
         for block in f['evidence_blocks']:
             evidence.append('<p>근거 구간: %s / 줄 %s</p>' % (esc(label(block['section'])), block['source_locator']['line']))
             if block['type'] == 'table':
-                header = '<tr>' + ''.join('<th>%s</th>' % esc(cell) for cell in block['headers']) + '</tr>'
-                rows = ''.join('<tr>' + ''.join('<td>%s</td>' % esc(cell) for cell in row) + '</tr>' for row in block['rows'])
-                evidence.append('<div class="table-scroll"><table>%s%s</table></div>' % (header, rows))
+                evidence.append(blocks_html([('table', block['headers'], block['rows'])]))
             else:
                 evidence.append('<pre>%s</pre>' % esc(block['text']))
         steps = ''.join('<li>%s</li>' % esc(step) for step in f['verification_steps'])
         articles.append('<article data-status="%s" data-priority="%s" data-category="%s"><h2>%s</h2><p>공식: %s / 우선순위: %s / %s</p><p>%s</p><p>%s</p><p>%s</p><p>평가 범위: %s / 변경 승인: %s</p><ul>%s</ul><details><summary>마스킹된 근거</summary>%s</details></article>' %
                         (*tuple(esc(x) for x in (f['official_status'], f['priority'], f['category'], f['title'], status_text(f),
                                                priority_text(f['priority']), f['category'], f['observed'], f['recommendation'], f['impact'],
-                                               assessment_text(f), {True: '필요', False: '불필요', None: '미정'}[f['approval_required']])),
+                                               assessment_text(f), APPROVAL_KO[f['approval_required']])),
                          steps, ''.join(evidence) or '<pre>%s</pre>' % esc(f['detail'])))
     return '''<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
@@ -918,7 +911,6 @@ def lock_output(root):
     A lock file is used only when the filesystem refuses directory locks (for example
     some NFS mounts). An existing lock file (0.4.0 or fallback) must stay owner-only.
     """
-    import errno
     import fcntl
     legacy = root / LEGACY_LOCK
     if legacy.exists() or legacy.is_symlink():
