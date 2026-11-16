@@ -174,3 +174,8 @@ cd aistor-diag-analyzer-<버전>-el8-x86_64
 201 서버 새 수집처럼 Summary가 `1 warning`·`1 error` 단수형이면 입력 오류(종료 코드 2)로 거부되던 문제를 고쳤습니다.
 R2 결합에서 Markdown 해석 오류를 공식 Markdown으로 지목, 상대 경로 입력을 절대 경로로 표시, MD 표의 불필요한 백슬래시 제거,
 입력·출력 충돌 거부 시 원인 표시. 판정·종료 코드·120초 결합 허용치는 그대로. 상세는 [IMPROVEMENT_PLAN.md](IMPROVEMENT_PLAN.md)의 "0.4.4".
+
+### 2026-11-16 0.5.0 HTML 보고서 화면 개편
+
+HTML 보고서를 요약 대시보드, 서버×드라이브 격자, 검사 카드, THP·IOMMU·rlimit 비교표, 수집 오류 막대·히트맵, 고정 목차·심각도 필터 구성으로 바꿨습니다.
+판정·숫자·Markdown·JSON·종료 코드는 0.4.4와 같습니다. 상세는 [IMPROVEMENT_PLAN.md](IMPROVEMENT_PLAN.md)의 "0.5.0".
