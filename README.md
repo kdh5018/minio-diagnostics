@@ -7,8 +7,8 @@ MinIO AIStor의 진단 Markdown(mc 보고서)과 원본 diagnostics gzip을 읽�
 
 | 항목 | 내용 |
 |---|---|
-| 최신 배포본 | 0.4.0 (`el8-x86_64`: RHEL·Rocky·AlmaLinux 8/9/10, x86_64). 런타임 동봉, 서버에 Python 설치 불필요 |
-| 분석기 버전 | R1 `0.4.0-r1`(공식 Markdown), R2 `0.4.0-r2`(원본 gzip 결합, JSON 스키마 `1.3-r2`) |
+| 최신 배포본 | 0.4.1 (`el8-x86_64`: RHEL·Rocky·AlmaLinux 8/9/10, x86_64). 런타임 동봉, 서버에 Python 설치 불필요 |
+| 분석기 버전 | R1 `0.4.1-r1`(공식 Markdown), R2 `0.4.1-r2`(원본 gzip 결합, JSON 스키마 `1.3-r2`) |
 | 검증 | Rocky 8·9·10 최소 컨테이너(Python 없음, 네트워크 차단, 비root), 2026-10-12 샘플, 2026-10-14 R3 실자료 |
 | 라이선스 | 사내·고객사 전용(`LICENSE`). 런타임 제3자 고지는 배포본 `licenses/` |
 | 개선 계획·상태 | [`docs/IMPROVEMENT_PLAN.md`](docs/IMPROVEMENT_PLAN.md) |
@@ -20,9 +20,9 @@ MinIO AIStor의 진단 Markdown(mc 보고서)과 원본 diagnostics gzip을 읽�
 ## 사용자용 빠른 시작 (배포본)
 
 ```bash
-sha256sum -c aistor-diag-analyzer-0.4.0-el8-x86_64.tar.gz.sha256
-tar -xzf aistor-diag-analyzer-0.4.0-el8-x86_64.tar.gz
-cd aistor-diag-analyzer-0.4.0-el8-x86_64
+sha256sum -c aistor-diag-analyzer-0.4.1-el8-x86_64.tar.gz.sha256
+tar -xzf aistor-diag-analyzer-0.4.1-el8-x86_64.tar.gz
+cd aistor-diag-analyzer-0.4.1-el8-x86_64
 ./run-report.sh --check --verify-bundle                          # 사전 점검만
 ./run-report.sh --official-report /경로/diag-report-....md        # 공식 Markdown 단독
 ./run-report.sh --official-report /경로/diag-report-....md \
