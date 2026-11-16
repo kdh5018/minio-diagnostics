@@ -409,6 +409,14 @@ file_owner_mode() {
     stat -c '소유자 %U(UID %u), 권한 %a' -- "$1" 2>/dev/null || printf '%s' '소유자·권한 확인 불가'
 }
 
+current_user() {
+    # 계정 이름이 없는 UID(컨테이너 등)에서는 id -un이 실패하면서 숫자를 출력하므로 결과를 버린다.
+    local name uid
+    uid=$(id -u)
+    name=$(id -un 2>/dev/null) || name=
+    if [ -n "$name" ] && [ "$name" != "$uid" ]; then printf '%s(UID %s)' "$name" "$uid"; else printf 'UID %s(계정 이름 없음)' "$uid"; fi
+}
+
 blocked_parent() {
     # 경로의 상위 디렉터리 중 현재 사용자가 들어갈 수 없는(x 권한 없음) 첫 디렉터리를 출력한다.
     local dir
@@ -441,7 +449,7 @@ check_input() {
         local blocked
         if blocked=$(blocked_parent "$path"); then
             die "$EXIT_USAGE" "입력 오류: $label 파일의 상위 디렉터리에 들어갈 권한이 없습니다: $blocked ($(file_owner_mode "$blocked"))" \
-                "현재 사용자: $(id -un 2>/dev/null || id -u)(UID $(id -u))" \
+                "현재 사용자: $(current_user)" \
                 "디렉터리 소유자 계정으로 실행하거나, 읽을 수 있는 위치에 받은 사본을 지정하십시오. 이 도구는 권한을 바꾸지 않습니다."
         fi
         die "$EXIT_USAGE" "입력 오류: $label 파일이 없습니다: $path" "경로와 파일 이름(대소문자·확장자)을 확인하십시오."
@@ -449,7 +457,7 @@ check_input() {
     [ -f "$path" ] || die "$EXIT_USAGE" "입력 오류: $label 은(는) 일반 파일이 아닙니다: $path"
     if [ ! -r "$path" ]; then
         die "$EXIT_USAGE" "입력 오류: $label 파일을 읽을 권한이 없습니다: $path" \
-            "  파일: $(file_owner_mode "$path") / 현재 사용자: $(id -un 2>/dev/null || id -u)(UID $(id -u))" \
+            "  파일: $(file_owner_mode "$path") / 현재 사용자: $(current_user)" \
             "  파일 소유자 계정으로 실행하거나, 소유자에게 읽기 가능한 사본을 받아 지정하십시오." \
             "  원본 파일의 권한은 바꾸지 마십시오(이 도구도 바꾸지 않습니다)."
     fi
