@@ -9,19 +9,21 @@
 # - 런타임 제3자 라이선스 원문은 같은 릴리스의 full 배포판(python/licenses/)에서 가져온다.
 #   stripped 배포판에는 CPython 라이선스만 들어 있기 때문이다. SHA-256을 고정하며,
 #   미리 받은 파일은 --license-archive, 이미 풀어 둔 폴더는 --license-dir로 지정한다.
+#   어느 경우든 원문 파일마다 고정된 SHA-256(LICENSE_MANIFEST)과 대조한다.
 # - 고객·테스트 서버에서 실행하는 스크립트가 아니다. 서버에는 결과 tar.gz만 반입한다.
 # - 진단 원본·보고서·.git·인증정보·테스트 잔여물·백업·내부 계약서는 포함하지 않으며,
 #   묶기 전에 금지 목록 검사를 다시 수행한다.
 #
-# 대상 추가 방법: target_config()에 "<os>-<arch>)" 블록 하나를 추가한다.
+# 대상 추가 방법: 아래 TARGET_TABLE에 한 줄을 추가한다(다른 코드는 고치지 않는다).
 #   필요한 값은 런타임 triple, 해당 런타임 파일과 full 배포판의 SHA-256,
-#   지원 OS ID·주 버전, 최소 glibc다.
+#   지원 OS ID·주 버전, 최소 glibc다. full 배포판이 새 것이면 LICENSE_MANIFEST에
+#   그 배포판의 python/licenses/ 파일별 SHA-256도 추가한다. 점검 목록은 docs/IMPROVEMENT_PLAN.md.
 
 set -euo pipefail
 umask 022
 
 readonly PACKAGE_NAME=aistor-diag-analyzer
-readonly PACKAGE_VERSION=0.3.1
+readonly PACKAGE_VERSION=0.4.0
 readonly PBS_RELEASE=20261110
 readonly PBS_PYTHON=3.12.16
 readonly APP_FILES=(analyze.py aistordoctor.py r2_health.py r2_enrichment.py)
@@ -47,48 +49,74 @@ usage() {
   --runtime-archive <파일>  미리 받은 런타임 파일 사용(내려받지 않음)
   --runtime-sha256 <값>     런타임 파일 SHA-256 재지정(시험용; 기본은 대상별 고정값)
   --license-archive <파일>  미리 받은 full 배포판(.tar.zst)에서 제3자 라이선스 원문 추출
-  --license-dir <디렉터리>  이미 풀어 둔 python/licenses 폴더 사용(SHA 미검증으로 기록)
+  --license-dir <디렉터리>  이미 풀어 둔 python/licenses 폴더 사용(파일별 고정 SHA-256과 대조)
+  --allow-unverified-licenses
+                            라이선스 원문이 고정 SHA-256과 다르거나 대조 목록이 없어도 빌드
+                            (시험용. RELEASE-INFO에 THIRD_PARTY_LICENSE_VERIFIED=no로 기록)
   --allow-dirty             커밋되지 않은 분석기 변경이 있어도 빌드(배포 정보에 dirty 기록)
   --skip-runtime-exec       빌드 환경에서 런타임 실행 점검 생략(다른 CPU 대상 빌드용)
-  --list-targets            지원 대상 목록
+  --list-targets            지원 대상 목록(ID·설명·OS·glibc·triple·라이선스 대조 목록 여부)
   --scan-only <디렉터리>    금지 항목 검사만 실행
 USAGE
 }
 
 # ---------------------------------------------------------------- 대상 정의
-KNOWN_TARGETS="el8-x86_64"
+# 한 줄 = 한 대상. 열(| 구분): 대상ID|설명|OS ID(공백 구분)|OS 주 버전|최소 glibc|런타임 triple|
+#   런타임(install_only_stripped) SHA-256|full 배포판(라이선스 원문 출처) SHA-256
+# el8-x86_64: 런타임은 glibc 2.17 기준 빌드이므로 EL8(glibc 2.28) 이상에서 동작한다.
+# 미검증 예시(추가 전 SHA-256 확인·실환경 검증 필요, docs/IMPROVEMENT_PLAN.md 점검 목록 참고):
+#   el8-aarch64|RHEL·Rocky Linux·AlmaLinux 8/9/10 (aarch64)|rhel rocky almalinux|8 9 10|2.28|aarch64-unknown-linux-gnu|<확인 필요>|<확인 필요>
+#   ubuntu22-x86_64|Ubuntu 22.04/24.04 (x86_64)|ubuntu|22 24|2.35|x86_64-unknown-linux-gnu|6a9e62da...|a1b98760...
+TARGET_TABLE='
+el8-x86_64|RHEL·Rocky Linux·AlmaLinux 8/9/10 (x86_64)|rhel rocky almalinux|8 9 10|2.28|x86_64-unknown-linux-gnu|6a9e62dad033790aef722dbd370e0ce76ce17b73627ba3ae679f537049350b39|a1b98760371cfd145a1533ea75c89437cdaf538e84c5e84c469eda9065a251af
+'
+
+# full 배포판별 python/licenses/ 원문 파일 SHA-256. 형식: <full 배포판 SHA-256> <파일 SHA-256>  <파일명>
+LICENSE_MANIFEST='
+a1b98760371cfd145a1533ea75c89437cdaf538e84c5e84c469eda9065a251af 3bdff06e69991c94664f2ef5c5f8096f60b7dbec071756ea6cc26b445e06ec5b  LICENSE.bdb.txt
+a1b98760371cfd145a1533ea75c89437cdaf538e84c5e84c469eda9065a251af 1f38bbc7caacafd65169276d759c0d88c991b753b643ce35d0e45ea1971dd441  LICENSE.bzip2.txt
+a1b98760371cfd145a1533ea75c89437cdaf538e84c5e84c469eda9065a251af 86e61415828a8b5b06ec8d024e6f086ce155a8b85fd0c419c0ba4dc004e74fdd  LICENSE.cpython.txt
+a1b98760371cfd145a1533ea75c89437cdaf538e84c5e84c469eda9065a251af 122f2c27000472a201d337b9b31f7eb2b52d091b02857061a8880371612d9534  LICENSE.expat.txt
+a1b98760371cfd145a1533ea75c89437cdaf538e84c5e84c469eda9065a251af 2daec087a88e7c9b8082557cdeebad5bbb8155a4137472f0b22e269cd99d0c1e  LICENSE.libX11.txt
+a1b98760371cfd145a1533ea75c89437cdaf538e84c5e84c469eda9065a251af 56abe29bb1d9806a9e04fa9f80fed2c0f18027594df3f098148d814aef6bddfa  LICENSE.libXau.txt
+a1b98760371cfd145a1533ea75c89437cdaf538e84c5e84c469eda9065a251af 29cea33c32bbc9785142386377915612a2fa786482c46843383384aded2e09b1  LICENSE.libedit.txt
+a1b98760371cfd145a1533ea75c89437cdaf538e84c5e84c469eda9065a251af deaf3a42effb551a5b140fa9afefed183a27f1341c6d1bf430d106a5e6931fc0  LICENSE.libffi.txt
+a1b98760371cfd145a1533ea75c89437cdaf538e84c5e84c469eda9065a251af 9a4062de0a2c388a98cf35a35d348b62fa97c838a71c3c28ee1a2d7d0a565b02  LICENSE.liblzma.txt
+a1b98760371cfd145a1533ea75c89437cdaf538e84c5e84c469eda9065a251af 122ee1f7e258f2c3c0e538a75c037684f420454bf3850ddc74ce750bbf5fe86b  LICENSE.libuuid.txt
+a1b98760371cfd145a1533ea75c89437cdaf538e84c5e84c469eda9065a251af c5ffbfeaa501071ceeb97b7de2c0d703fdaa35de01c0fb6cbac1c28453a3e9fd  LICENSE.libxcb.txt
+a1b98760371cfd145a1533ea75c89437cdaf538e84c5e84c469eda9065a251af 669512af7219f58be03a398766d7c9da11a3b3df9d3f05cb74c5ceca25c8da3b  LICENSE.mpdecimal.txt
+a1b98760371cfd145a1533ea75c89437cdaf538e84c5e84c469eda9065a251af 87a4c4442337b8968ef956031c406b74f9cb7149b7ba87311bdaba534816201c  LICENSE.ncurses.txt
+a1b98760371cfd145a1533ea75c89437cdaf538e84c5e84c469eda9065a251af 7d5450cb2d142651b8afa315b5f238efc805dad827d91ba367d8516bc9d49e7a  LICENSE.openssl-3.txt
+a1b98760371cfd145a1533ea75c89437cdaf538e84c5e84c469eda9065a251af 38bef3d28b24f145ea293bd3b6eb4b20396982abc8303128fb493986ea5bc719  LICENSE.sqlite.txt
+a1b98760371cfd145a1533ea75c89437cdaf538e84c5e84c469eda9065a251af c0a69a2bfd757361ec7e6143973b103c90409316b49e9c88db26ad6388e79f16  LICENSE.tcl.txt
+a1b98760371cfd145a1533ea75c89437cdaf538e84c5e84c469eda9065a251af 3ac5cdd0bef6c43ce34c6a7ced452081d9e5a0bf94082b9f9147d23ec9e214f5  LICENSE.tix.txt
+a1b98760371cfd145a1533ea75c89437cdaf538e84c5e84c469eda9065a251af 6c9f0d975b41afaa34d22f55bb8986ce69e5cb7ad327cb2b28820cd425edf5ee  LICENSE.zlib-ng.txt
+a1b98760371cfd145a1533ea75c89437cdaf538e84c5e84c469eda9065a251af e32ff4e00d9d94930537635291da39e7e612703334bf6fde8c7f1686fe8a45a2  LICENSE.zlib.txt
+a1b98760371cfd145a1533ea75c89437cdaf538e84c5e84c469eda9065a251af 7055266497633c9025b777c78eb7235af13922117480ed5c674677adc381c9d8  LICENSE.zstd.txt
+'
+
+target_rows() { printf '%s\n' "$TARGET_TABLE" | grep -v '^[[:space:]]*$' | grep -v '^#'; }
+KNOWN_TARGETS=$(target_rows | cut -d'|' -f1 | tr '\n' ' ' | sed 's/ $//')
+
+list_targets() {
+    local id desc ids majors glibc triple rsha lsha manifest
+    while IFS='|' read -r id desc ids majors glibc triple rsha lsha; do
+        if printf '%s\n' "$LICENSE_MANIFEST" | grep -q "^$lsha "; then manifest=있음; else manifest=없음; fi
+        printf '%s\n  설명: %s\n  OS: %s (주 버전 %s), 최소 glibc %s\n  런타임: %s, SHA-256 %s\n  라이선스 원문 출처 SHA-256: %s (파일별 대조 목록 %s)\n' \
+            "$id" "$desc" "$ids" "$majors" "$glibc" "$triple" "$rsha" "$lsha" "$manifest"
+    done < <(target_rows)
+}
 
 target_config() {
     TARGET_ID=$1-$2
     TARGET_OS_BASE=$1
     TARGET_ARCH=$2
-    case $TARGET_ID in
-        el8-x86_64)
-            # RHEL 계열 8 이상. 런타임은 glibc 2.17 기준 빌드이므로 EL8(glibc 2.28)에서 동작한다.
-            TARGET_DESC="RHEL·Rocky Linux·AlmaLinux 8/9/10 (x86_64)"
-            TARGET_OS_IDS="rhel rocky almalinux"
-            TARGET_OS_MAJORS="8 9 10"
-            MIN_GLIBC=2.28
-            PBS_TRIPLE=x86_64-unknown-linux-gnu
-            RUNTIME_SHA256_PINNED=6a9e62dad033790aef722dbd370e0ce76ce17b73627ba3ae679f537049350b39
-            # 같은 빌드의 full 배포판(라이선스 원문 출처). install_only_stripped는 이 빌드에서 파생된다.
-            LICENSE_SHA256_PINNED=a1b98760371cfd145a1533ea75c89437cdaf538e84c5e84c469eda9065a251af
-            ;;
-        # 예시(미검증·미빌드). 요청이 오면 SHA-256을 확인해 채우고 실제 환경에서 검증한다.
-        # el8-aarch64)
-        #     TARGET_DESC="RHEL·Rocky Linux·AlmaLinux 8/9/10 (aarch64)"
-        #     TARGET_OS_IDS="rhel rocky almalinux"; TARGET_OS_MAJORS="8 9 10"; MIN_GLIBC=2.28
-        #     PBS_TRIPLE=aarch64-unknown-linux-gnu; RUNTIME_SHA256_PINNED=<확인 필요>
-        #     LICENSE_SHA256_PINNED=<확인 필요> ;;
-        # ubuntu22-x86_64)
-        #     TARGET_DESC="Ubuntu 22.04/24.04 (x86_64)"
-        #     TARGET_OS_IDS="ubuntu"; TARGET_OS_MAJORS="22 24"; MIN_GLIBC=2.35
-        #     PBS_TRIPLE=x86_64-unknown-linux-gnu; RUNTIME_SHA256_PINNED=6a9e62da...
-        #     LICENSE_SHA256_PINNED=a1b98760... ;;
-        *)
-            die "지원하지 않는 대상입니다: $TARGET_ID (가능: $KNOWN_TARGETS)"
-            ;;
-    esac
+    local row
+    row=$(target_rows | awk -F'|' -v id="$TARGET_ID" '$1 == id' | head -n 1)
+    [ -n "$row" ] || die "지원하지 않는 대상입니다: $TARGET_ID (가능: $KNOWN_TARGETS)"
+    IFS='|' read -r _ TARGET_DESC TARGET_OS_IDS TARGET_OS_MAJORS MIN_GLIBC PBS_TRIPLE \
+        RUNTIME_SHA256_PINNED LICENSE_SHA256_PINNED <<<"$row"
+    [ "${TARGET_ARCH}" = "${PBS_TRIPLE%%-*}" ] || die "대상 표 오류: $TARGET_ID 의 triple($PBS_TRIPLE)이 CPU와 다릅니다."
     RUNTIME_FILE=cpython-${PBS_PYTHON}+${PBS_RELEASE}-${PBS_TRIPLE}-install_only_stripped.tar.gz
     RUNTIME_URL=https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_RELEASE}/${RUNTIME_FILE//+/%2B}
     LICENSE_FILE=cpython-${PBS_PYTHON}+${PBS_RELEASE}-${PBS_TRIPLE}-pgo+lto-full.tar.zst
@@ -145,6 +173,7 @@ LICENSE_ARCHIVE=
 LICENSE_DIR=
 ALLOW_DIRTY=0
 SKIP_RUNTIME_EXEC=0
+ALLOW_UNVERIFIED_LICENSES=0
 
 while [ $# -gt 0 ]; do
     case $1 in
@@ -158,7 +187,8 @@ while [ $# -gt 0 ]; do
         --license-dir) LICENSE_DIR=${2:?}; shift 2 ;;
         --allow-dirty) ALLOW_DIRTY=1; shift ;;
         --skip-runtime-exec) SKIP_RUNTIME_EXEC=1; shift ;;
-        --list-targets) printf '%s\n' $KNOWN_TARGETS; exit 0 ;;
+        --allow-unverified-licenses) ALLOW_UNVERIFIED_LICENSES=1; shift ;;
+        --list-targets) list_targets; exit 0 ;;
         --scan-only)
             [ -d "${2:-}" ] || die "--scan-only 디렉터리가 없습니다."
             if scan_forbidden "$2"; then echo "금지 항목 없음"; exit 0; fi
@@ -240,12 +270,69 @@ fetch() {  # fetch <url> <파일>
     fi
     mv -f -- "$tmp" "$2"
 }
+# zstd 해제: zstd → unzstd → zstdcat → Python zstandard 모듈 → Python 3.14+ compression.zstd 순서로 찾는다.
+PY_ZSTD_EXTRACT='
+import sys, tarfile
+try:
+    from compression import zstd
+    opener = lambda p: zstd.open(p)
+except ImportError:
+    import zstandard
+    opener = lambda p: zstandard.ZstdDecompressor().stream_reader(open(p, "rb"))
+with opener(sys.argv[1]) as f, tarfile.open(fileobj=f, mode="r|") as t:
+    for m in t:
+        rest = m.name[len("python/licenses/"):]
+        if m.isfile() and m.name.startswith("python/licenses/") and "/" not in rest:
+            t.extract(m, sys.argv[2], filter="data")
+'
+extract_licenses() {  # extract_licenses <.tar.zst> <대상 디렉터리>
+    local tool
+    for tool in zstd unzstd zstdcat; do
+        if command -v "$tool" >/dev/null 2>&1; then
+            case $tool in zstd|unzstd) "$tool" -dc -- "$1" ;; zstdcat) zstdcat -- "$1" ;; esac |
+                tar -xf - -C "$2" --wildcards 'python/licenses/LICENSE.*'
+            echo "zstd 해제 도구: $tool"
+            return 0
+        fi
+    done
+    if command -v python3 >/dev/null 2>&1; then
+        if python3 -I -c 'import compression.zstd' >/dev/null 2>&1 || python3 -I -c 'import zstandard' >/dev/null 2>&1; then
+            python3 -I -c "$PY_ZSTD_EXTRACT" "$1" "$2"
+            echo "zstd 해제 도구: python3"
+            return 0
+        fi
+    fi
+    die "zstd 해제 도구가 없습니다. 다음 중 하나가 필요합니다(개발 환경): zstd·unzstd·zstdcat 명령, Python zstandard 모듈, Python 3.14 이상. 또는 --license-dir로 풀어 둔 python/licenses 폴더를 지정하십시오."
+}
+
+# 원문 폴더의 LICENSE.*.txt 집합과 파일별 SHA-256이 고정 목록과 정확히 같은지 대조한다.
+verify_licenses() {  # verify_licenses <디렉터리> <full 배포판 SHA-256>
+    local dir=$1 expected actual
+    expected=$(printf '%s\n' "$LICENSE_MANIFEST" | awk -v k="$2" '$1 == k {print $2 "  " $3}' | LC_ALL=C sort -k2)
+    if [ -z "$expected" ]; then
+        err "라이선스 원문 대조 목록이 없습니다(대상 $TARGET_ID, full 배포판 SHA-256 $2)."
+        return 1
+    fi
+    actual=$(cd -- "$dir" && find . -maxdepth 1 -type f -name 'LICENSE.*.txt' -printf '%f\0' | LC_ALL=C sort -z | xargs -0 -r sha256sum | LC_ALL=C sort -k2)
+    if [ "$expected" != "$actual" ]; then
+        err "라이선스 원문 SHA-256이 고정 목록과 다릅니다(파일 누락·추가·내용 변경):"
+        diff <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") | grep '^[<>]' | sed 's/^</  고정:/; s/^>/  실제:/' >&2 || true
+        return 1
+    fi
+    return 0
+}
+
 LICENSE_WORK=$(mktemp -d "${TMPDIR:-/tmp}/aistor-lic.XXXXXX")
 trap 'rm -rf -- "$LICENSE_WORK"' EXIT
+case ${LICENSE_SHA256_PINNED:-} in
+    [0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;;
+    *) [ -n "$LICENSE_DIR" ] && [ "$ALLOW_UNVERIFIED_LICENSES" -eq 1 ] ||
+        die "대상 $TARGET_ID 의 full 배포판 SHA-256이 정해지지 않았습니다." ;;
+esac
 if [ -n "$LICENSE_DIR" ]; then
     [ -d "$LICENSE_DIR" ] || die "--license-dir 디렉터리가 없습니다: $LICENSE_DIR"
     LICENSE_SRC=$LICENSE_DIR
-    LICENSE_ORIGIN="directory (archive SHA-256 not verified)"
+    LICENSE_ORIGIN="directory (reference: $LICENSE_FILE sha256=${LICENSE_SHA256_PINNED:-none})"
 else
     if [ -z "$LICENSE_ARCHIVE" ]; then
         mkdir -p -- "$CACHE_DIR"
@@ -253,35 +340,25 @@ else
         [ -f "$LICENSE_ARCHIVE" ] || fetch "$LICENSE_URL" "$LICENSE_ARCHIVE"
     fi
     [ -f "$LICENSE_ARCHIVE" ] || die "라이선스 원문 출처 파일이 없습니다: $LICENSE_ARCHIVE"
-    case ${LICENSE_SHA256_PINNED:-} in
-        [0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;;
-        *) die "대상 $TARGET_ID 의 full 배포판 SHA-256이 정해지지 않았습니다." ;;
-    esac
     actual=$(sha256sum -- "$LICENSE_ARCHIVE" | cut -d' ' -f1)
     [ "$actual" = "$LICENSE_SHA256_PINNED" ] || die "full 배포판 SHA-256 불일치: $actual (기대 $LICENSE_SHA256_PINNED)"
-    # python/licenses/ 만 꺼낸다. zstd 해제는 tar --zstd(zstd 필요) 또는 Python 3.14+ compression.zstd.
-    if command -v zstd >/dev/null 2>&1; then
-        tar --zstd -xf "$LICENSE_ARCHIVE" -C "$LICENSE_WORK" --wildcards 'python/licenses/*'
-    elif command -v python3 >/dev/null 2>&1 && python3 -I -c 'import compression.zstd' >/dev/null 2>&1; then
-        python3 -I -c '
-import sys, tarfile
-from compression import zstd
-with zstd.open(sys.argv[1]) as f, tarfile.open(fileobj=f, mode="r|") as t:
-    for m in t:
-        rest = m.name[len("python/licenses/"):]
-        if m.isfile() and m.name.startswith("python/licenses/") and "/" not in rest:
-            t.extract(m, sys.argv[2], filter="data")
-' "$LICENSE_ARCHIVE" "$LICENSE_WORK"
-    else
-        die "zstd 해제 도구가 없습니다(zstd 또는 Python 3.14 이상). --license-dir로 풀어 둔 폴더를 지정하십시오."
-    fi
+    extract_licenses "$LICENSE_ARCHIVE" "$LICENSE_WORK"
     LICENSE_SRC=$LICENSE_WORK/python/licenses
     LICENSE_ORIGIN="$LICENSE_FILE sha256=$LICENSE_SHA256_PINNED"
 fi
 for f in "${REQUIRED_RUNTIME_LICENSES[@]}"; do
     [ -s "$LICENSE_SRC/$f" ] || die "필수 제3자 라이선스 원문이 없습니다: $f"
 done
-echo "제3자 라이선스 원문: $(cd -- "$LICENSE_SRC" && ls LICENSE.*.txt | wc -l)개 ($LICENSE_ORIGIN)"
+if verify_licenses "$LICENSE_SRC" "${LICENSE_SHA256_PINNED:-none}"; then
+    LICENSE_VERIFIED=yes
+elif [ "$ALLOW_UNVERIFIED_LICENSES" -eq 1 ]; then
+    LICENSE_VERIFIED=no
+    LICENSE_ORIGIN="UNVERIFIED (per-file SHA-256 not matched; --allow-unverified-licenses) $LICENSE_ORIGIN"
+    err "경고: 라이선스 원문을 검증하지 않고 빌드합니다(시험용). RELEASE-INFO에 기록됩니다."
+else
+    die "라이선스 원문 검증 실패. 고정된 full 배포판에서 추출하거나(--license-archive) 시험용이면 --allow-unverified-licenses를 지정하십시오."
+fi
+echo "제3자 라이선스 원문: $(cd -- "$LICENSE_SRC" && ls LICENSE.*.txt | wc -l)개 (검증=$LICENSE_VERIFIED, $LICENSE_ORIGIN)"
 
 # ---------------------------------------------------------------- 스테이징
 BUNDLE=$PACKAGE_NAME-$PACKAGE_VERSION-$TARGET_ID
@@ -359,6 +436,7 @@ BUILD_DATE=$BUILD_DATE
 LICENSE_STATUS=$LICENSE_STATUS_VALUE
 LICENSE=Proprietary - Copyright (c) 2026 WNYTech. All rights reserved. (internal and customer use only)
 THIRD_PARTY_LICENSE_SOURCE=python-build-standalone $PBS_RELEASE $LICENSE_ORIGIN
+THIRD_PARTY_LICENSE_VERIFIED=$LICENSE_VERIFIED
 INFO
 
 cat >"$STAGE/licenses/NOTICE-ko.txt" <<NOTICE
@@ -430,6 +508,21 @@ Python 런타임이 포함되어 있으므로 서버에 Python·pip·패키지�
   ./run-report.sh --official-report "/경로/diag-report-....md" \\
                   --health "/경로/diag-data-....json.gz" --allow-partial
 
+  # 원본 gzip 단독, 우선순위 P2 이상 항목이 있으면 종료 코드 1
+  ./run-report.sh --health "/경로/diag-data-....json.gz" --fail-on-priority P2
+
+  - 공통 옵션(공식 Markdown 단독·원본 gzip 결합 모두): --lang ko, --mask strict|basic(기본 strict),
+    --fail-on-priority P1|P2|P3|P4, --as-of <시간대 포함 시각>, --allow-partial
+  - --official-report에는 .md, --health에는 .json.gz를 지정합니다. 서로 바꿔 지정하면
+    실행 전에 알려 줍니다.
+  - 두 파일은 같은 수집에서 나온 것이어야 합니다. 수집 시각 차가 120초를 넘거나 서버 대상이
+    다르면 결합을 거부하고(종료 코드 2) 시각 차·대상 수와 조치 방법을 표시합니다.
+    로컬에서 다시 만든 Markdown의 Date는 생성 시각이므로 원본과 차이가 날 수 있습니다.
+    이때는 같은 수집의 파일을 쓰거나 두 파일을 따로 분석하십시오.
+  - 입력 파일을 읽을 권한이 없으면(예: 다른 사용자 소유 0600) 소유자·권한을 표시합니다.
+    파일 소유자 계정으로 실행하거나 읽을 수 있는 사본을 만들어 지정하십시오.
+    원본 파일의 권한은 바꾸지 마십시오.
+
   - 기본 저장 위치: ~/aistor-diag-output  (변경: --out-dir <디렉터리>)
   - 같은 위치에 기존 결과가 있으면 --force가 필요합니다.
     --force는 이전 결과를 지우거나 덮어쓰지 않고 새 세대를 추가합니다.
@@ -446,14 +539,17 @@ Python 런타임이 포함되어 있으므로 서버에 Python·pip·패키지�
   <저장 위치>/run-<id>/manifest.json             파일별 SHA-256
   <저장 위치>/CURRENT.json                       최신 결과 세대 포인터
 
+  결과 보기: 서버에 브라우저가 없으면 run-<id> 폴더를 PC로 복사해 HTML을 여십시오.
+  보고서 상단에 공식 판정 요약, 하단에 확인된 정보·입력 결합 확인·원본 관측 정보·한계가 표로 나옵니다.
+
   결과 폴더는 소유자 전용 권한(디렉터리 700, 파일 600)으로 저장됩니다.
   보고서는 마스킹을 적용하지만, 외부 공유 전에는 반드시 직접 검토하십시오.
 
 4. 종료 코드
 ------------
   0  요청 범위 처리 성공(시스템이 정상이라는 판정은 아님)
-  1  (R1) --fail-on-priority 조건에 해당하는 항목 있음
-  2  입력 오류(파일 없음·형식·인코딩·크기 제한)
+  1  --fail-on-priority 조건에 해당하는 항목 있음(두 실행 방식 공통)
+  2  입력 오류(파일 없음·권한·형식·인코딩·크기 제한·두 입력 결합 거부). 원인과 조치가 함께 표시됨
   3  마스킹·보호 저장 실패, 출력 위치 문제(기존 결과는 보존)
   4  부분 분석. --allow-partial을 지정했다면 제한 보고서가 저장되고 경로가 표시됨
   5  지원하지 않는 실행 환경(분석 미실행, 설치 시도 없음)
@@ -463,6 +559,10 @@ Python 런타임이 포함되어 있으므로 서버에 Python·pip·패키지�
 - 공식 판정(official_status)과 이 도구의 자체 점검·해설은 서로 다른 것입니다.
 - 미평가·미제공·수집 오류 항목은 정상 판정이 아닙니다.
 - 부분 분석(4)은 자료가 부족하다는 뜻이며 오류를 숨기지 않습니다.
+- THP 자체 점검은 공식 sys.mem.thp 검사 Resolution의 권장값(enabled=madvise, defrag=defer+madvise
+  또는 madvise, max_ptes_none=0)과 관측값을 비교한 결과입니다. 공식 판정이 우선합니다.
+- 수집 오류 유형(예: CPU 주파수 정책 / 파일 없음)은 고정 분류이며 원인을 확정하지 않습니다.
+  sys.errors가 없거나 형식이 다른 행이 있으면 오류 행 수는 "최소 N"으로 표시됩니다.
 
 6. 배포물 정보
 --------------

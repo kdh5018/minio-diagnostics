@@ -38,20 +38,24 @@ usage() {
     cat <<'USAGE'
 사용법: run-report.sh [옵션]
 
-필수(둘 중 하나 이상):
+MinIO AIStor 진단 결과 파일을 이 서버 안에서만 읽어 한국어 보고서(HTML·Markdown·JSON)를 만듭니다.
+네트워크 접속·패키지 설치·진단 수집·서버 설정 변경을 하지 않습니다.
+
+입력(둘 중 하나 이상):
   --official-report <파일>   공식 진단 Markdown(diag-report-*.md)
-  --health <파일>            원본 진단 gzip(diag-data-*.json.gz). 지정하면 R2 결합 분석
+  --health <파일>            원본 진단 gzip(diag-data-*.json.gz). 지정하면 R2 분석
+                             두 파일을 함께 주면 같은 수집(대상 일치, 시각 차이 120초 이내)일 때만 결합합니다.
 
 출력:
-  --out-dir <디렉터리>       보고서 저장 위치(기본: ~/aistor-diag-output)
+  --out-dir <디렉터리>       보고서 저장 위치(기본: ~/aistor-diag-output, 소유자 전용 700)
   --force                    기존 결과가 있을 때 새 세대를 추가(이전 결과는 삭제하지 않음)
   --allow-partial            자료 부족 항목을 미평가로 남긴 제한 보고서 저장을 허용
 
-분석 옵션:
-  --mask strict|basic        마스킹 수준(기본 strict, R2는 strict만 지원)
-  --as-of <ISO8601 시각>     인증서 유효기간 판정 기준 시각
-  --lang ko                  (R1 전용) 보고서 언어
-  --fail-on-priority P1..P4  (R1 전용) 해당 우선순위 항목이 있으면 종료 코드 1
+분석 옵션(R1·R2 공통):
+  --mask strict|basic        마스킹 수준(기본 strict). 원본 gzip은 항상 허용 필드만 추출
+  --as-of <ISO8601 시각>     인증서 유효기간 판정 기준 시각(시간대 필수, 예: 2026-10-12T09:00:00+09:00)
+  --lang ko                  보고서 언어(현재 ko만 지원)
+  --fail-on-priority P1..P4  해당 우선순위 항목이 있으면 종료 코드 1(부분 분석 4가 우선)
 
 실행 환경:
   --check                    실행 환경·입력·출력 위치만 점검하고 분석하지 않음
@@ -61,10 +65,36 @@ usage() {
   --version                  배포물 버전 정보 출력
   -h, --help                 이 도움말
 
+예시:
+  ./run-report.sh --official-report diag-report-xxx.md --out-dir ~/report-out
+  ./run-report.sh --health diag-data-xxx.json.gz --out-dir ~/report-out --allow-partial
+  ./run-report.sh --official-report diag-report-xxx.md --health diag-data-xxx.json.gz --out-dir ~/report-out --allow-partial
+  ./run-report.sh --check --official-report diag-report-xxx.md
+
+결과 보기:
+  완료 후 표시되는 "HTML 보고서" 경로를 브라우저로 여십시오. 서버에 브라우저가 없으면
+  결과 폴더를 승인된 방법으로 PC에 옮겨 여십시오(외부 접속이 필요 없는 단일 HTML 파일).
+
 종료 코드:
-  0 처리 성공(시스템 정상 판정 아님)  1 R1 우선순위 조건 충족  2 입력 오류
+  0 처리 성공(시스템 정상 판정 아님)  1 --fail-on-priority 조건 충족  2 입력 오류
   3 마스킹·저장 실패  4 부분 분석  5 지원하지 않는 실행 환경
 USAGE
+}
+
+# 자주 틀리는 옵션 이름 안내(자동으로 바꾸지 않는다).
+suggest_option() {
+    case ${1%%=*} in
+        --output-dir|--outdir|--output|--out|-o) printf '%s' '--out-dir' ;;
+        --report|--md|--markdown|--official|--official-md) printf '%s' '--official-report' ;;
+        --gz|--data|--health-data|--diag-data|--json) printf '%s' '--health' ;;
+        --partial|--allow_partial) printf '%s' '--allow-partial' ;;
+        --asof|--as_of|--at) printf '%s' '--as-of' ;;
+        --fail-on|--priority) printf '%s' '--fail-on-priority' ;;
+        --masking) printf '%s' '--mask' ;;
+        -f|--overwrite) printf '%s' '--force' ;;
+        -v|-V) printf '%s' '--version' ;;
+        *) return 1 ;;
+    esac
 }
 
 # ---------------------------------------------------------------- 위치 확인
@@ -165,7 +195,15 @@ while [ $# -gt 0 ]; do
             say "aistor-diag-analyzer ${R_PACKAGE_VERSION:-source} (${R_TARGET_ID:-$LAYOUT})"
             exit 0 ;;
         -h|--help) usage; exit 0 ;;
-        *) die "$EXIT_USAGE" "사용법 오류: 알 수 없는 인자입니다: $1" "도움말: run-report.sh --help" ;;
+        *)
+            if hint=$(suggest_option "$1"); then
+                die "$EXIT_USAGE" "사용법 오류: 알 수 없는 인자입니다: $1" "혹시 $hint 옵션을 의미했습니까?" "도움말: run-report.sh --help"
+            fi
+            case $1 in
+                -*) die "$EXIT_USAGE" "사용법 오류: 알 수 없는 인자입니다: $1" "도움말: run-report.sh --help" ;;
+                *) die "$EXIT_USAGE" "사용법 오류: 알 수 없는 인자입니다: $1" \
+                    "입력 파일은 옵션과 함께 지정하십시오: --official-report <md> 또는 --health <gz>" "도움말: run-report.sh --help" ;;
+            esac ;;
     esac
 done
 
@@ -176,17 +214,12 @@ fi
 
 if [ -n "$HEALTH" ]; then
     MODE=R2
-    # R2(r2_health.py)는 R1 전용 옵션을 지원하지 않는다. 몰래 버리지 않고 거부한다.
-    [ -z "$FAIL_ON" ] || die "$EXIT_USAGE" "사용법 오류: --fail-on-priority는 R1(공식 Markdown 단독) 전용입니다. --health와 함께 쓸 수 없습니다."
-    [ -z "$LANG_OPT" ] || die "$EXIT_USAGE" "사용법 오류: --lang은 R1 전용입니다. --health와 함께 쓸 수 없습니다."
-    if [ "$MASK_SET" -eq 1 ] && [ "$MASK" != strict ]; then
-        die "$EXIT_USAGE" "사용법 오류: R2(--health) 분석은 --mask strict만 지원합니다."
-    fi
 else
     MODE=R1
-    case $LANG_OPT in ''|ko) ;; *) die "$EXIT_USAGE" "사용법 오류: --lang은 ko만 지원합니다." ;; esac
-    case $FAIL_ON in ''|P1|P2|P3|P4) ;; *) die "$EXIT_USAGE" "사용법 오류: --fail-on-priority는 P1·P2·P3·P4 중 하나입니다." ;; esac
 fi
+# 0.4.0부터 --lang, --fail-on-priority, --mask는 R1·R2 공통이다.
+case $LANG_OPT in ''|ko) ;; *) die "$EXIT_USAGE" "사용법 오류: --lang은 ko만 지원합니다." ;; esac
+case $FAIL_ON in ''|P1|P2|P3|P4) ;; *) die "$EXIT_USAGE" "사용법 오류: --fail-on-priority는 P1·P2·P3·P4 중 하나입니다." ;; esac
 case $MASK in ''|strict|basic) ;; *) die "$EXIT_USAGE" "사용법 오류: --mask는 strict 또는 basic입니다." ;; esac
 [ -n "$MASK" ] || MASK=strict
 
@@ -371,18 +404,69 @@ verify_bundle() {
     note "배포물 체크섬: 일치"
 }
 
+file_owner_mode() {
+    # 소유자 계정·UID와 권한(8진수)만 보여 준다. 파일 내용은 읽지 않는다.
+    stat -c '소유자 %U(UID %u), 권한 %a' -- "$1" 2>/dev/null || printf '%s' '소유자·권한 확인 불가'
+}
+
+blocked_parent() {
+    # 경로의 상위 디렉터리 중 현재 사용자가 들어갈 수 없는(x 권한 없음) 첫 디렉터리를 출력한다.
+    local dir
+    dir=$(dirname -- "$1")
+    local -a chain=()
+    while :; do
+        chain=("$dir" "${chain[@]}")
+        if [ "$dir" = / ] || [ "$dir" = . ]; then break; fi
+        dir=$(dirname -- "$dir")
+    done
+    for dir in "${chain[@]}"; do
+        if [ -d "$dir" ] && [ ! -x "$dir" ]; then
+            printf '%s' "$dir"
+            return 0
+        fi
+    done
+    return 1
+}
+
 check_input() {
-    # check_input 라벨 경로
-    local label=$1 path=$2
+    # check_input 라벨 경로 종류(md|gz)
+    local label=$1 path=$2 kind=$3
     if [ -L "$path" ]; then
         local real
         real=$(readlink -f -- "$path" 2>/dev/null) || real='(확인 불가)'
         die "$EXIT_USAGE" "입력 오류: $label 이(가) 심볼릭 링크입니다: $path" \
             "실제 파일 경로를 직접 지정하십시오: $real"
     fi
-    [ -e "$path" ] || die "$EXIT_USAGE" "입력 오류: $label 파일이 없습니다: $path"
+    if [ ! -e "$path" ]; then
+        local blocked
+        if blocked=$(blocked_parent "$path"); then
+            die "$EXIT_USAGE" "입력 오류: $label 파일의 상위 디렉터리에 들어갈 권한이 없습니다: $blocked ($(file_owner_mode "$blocked"))" \
+                "현재 사용자: $(id -un 2>/dev/null || id -u)(UID $(id -u))" \
+                "디렉터리 소유자 계정으로 실행하거나, 읽을 수 있는 위치에 받은 사본을 지정하십시오. 이 도구는 권한을 바꾸지 않습니다."
+        fi
+        die "$EXIT_USAGE" "입력 오류: $label 파일이 없습니다: $path" "경로와 파일 이름(대소문자·확장자)을 확인하십시오."
+    fi
     [ -f "$path" ] || die "$EXIT_USAGE" "입력 오류: $label 은(는) 일반 파일이 아닙니다: $path"
-    [ -r "$path" ] || die "$EXIT_USAGE" "입력 오류: $label 파일을 읽을 권한이 없습니다: $path"
+    if [ ! -r "$path" ]; then
+        die "$EXIT_USAGE" "입력 오류: $label 파일을 읽을 권한이 없습니다: $path" \
+            "  파일: $(file_owner_mode "$path") / 현재 사용자: $(id -un 2>/dev/null || id -u)(UID $(id -u))" \
+            "  파일 소유자 계정으로 실행하거나, 소유자에게 읽기 가능한 사본을 받아 지정하십시오." \
+            "  원본 파일의 권한은 바꾸지 마십시오(이 도구도 바꾸지 않습니다)."
+    fi
+    local magic=
+    if command -v od >/dev/null 2>&1; then
+        magic=$(od -An -tx1 -N2 -- "$path" 2>/dev/null | tr -d ' \n') || magic=
+    fi
+    if [ -n "$magic" ]; then
+        if [ "$kind" = gz ] && [ "$magic" != 1f8b ]; then
+            die "$EXIT_USAGE" "입력 오류: $label 이(가) gzip 파일이 아닙니다: $path" \
+                "--health에는 diag-data-*.json.gz를, 공식 Markdown(diag-report-*.md)은 --official-report로 지정하십시오."
+        fi
+        if [ "$kind" = md ] && [ "$magic" = 1f8b ]; then
+            die "$EXIT_USAGE" "입력 오류: $label 에 gzip 파일을 지정했습니다: $path" \
+                "원본 gzip(diag-data-*.json.gz)은 --health로, 공식 Markdown(diag-report-*.md)은 --official-report로 지정하십시오."
+        fi
+    fi
     note "입력($label): $path"
 }
 
@@ -430,8 +514,8 @@ check_output() {
 check_platform
 [ "$VERIFY_BUNDLE" -eq 0 ] || verify_bundle
 select_runtime
-[ -z "$REPORT" ] || check_input "공식 Markdown" "$REPORT"
-[ -z "$HEALTH" ] || check_input "원본 gzip" "$HEALTH"
+[ -z "$REPORT" ] || check_input "공식 Markdown" "$REPORT" md
+[ -z "$HEALTH" ] || check_input "원본 gzip" "$HEALTH" gz
 check_output
 
 if [ "$CHECK_ONLY" -eq 1 ]; then
@@ -452,10 +536,8 @@ args+=("--out-dir=$OUT_DIR" "--mask=$MASK")
 [ -z "$AS_OF" ] || args+=("--as-of=$AS_OF")
 [ "$ALLOW_PARTIAL" -eq 0 ] || args+=(--allow-partial)
 [ "$FORCE" -eq 0 ] || args+=(--force)
-if [ "$MODE" = R1 ]; then
-    [ -z "$LANG_OPT" ] || args+=("--lang=$LANG_OPT")
-    [ -z "$FAIL_ON" ] || args+=("--fail-on-priority=$FAIL_ON")
-fi
+[ -z "$LANG_OPT" ] || args+=("--lang=$LANG_OPT")
+[ -z "$FAIL_ON" ] || args+=("--fail-on-priority=$FAIL_ON")
 
 say "[$MODE] 분석 시작 (네트워크·설치 없음)"
 for line in "${CHECK_LINES[@]}"; do
@@ -476,11 +558,12 @@ done <<<"$output"
 
 show_paths() {
     say "  결과 폴더: $GENERATION"
-    say "  HTML 보고서: $GENERATION/aistor-diag-report.html"
+    say "  HTML 보고서(브라우저로 열기): $GENERATION/aistor-diag-report.html"
     say "  Markdown: $GENERATION/aistor-diag-report.md"
     say "  JSON: $GENERATION/aistor-diag-report.json"
     say "  manifest: $GENERATION/manifest.json"
     say "  최신 결과 포인터: $OUT_DIR/CURRENT.json"
+    say "  서버에 브라우저가 없으면 결과 폴더를 승인된 방법으로 PC에 옮겨 HTML을 여십시오(외부 접속 불필요)."
 }
 
 case $rc in
@@ -491,7 +574,7 @@ case $rc in
         say "완료(종료 코드 1): 보고서를 저장했고 --fail-on-priority $FAIL_ON 조건에 해당하는 항목이 있습니다."
         [ -z "$GENERATION" ] || show_paths ;;
     2)
-        err "실패(종료 코드 2): 입력 오류. 파일 형식·인코딩·경로·크기 제한을 확인하십시오. 결과를 저장하지 않았습니다." ;;
+        err "실패(종료 코드 2): 입력 오류. 위 안내(분석기 메시지)를 확인하십시오. 결과를 저장하지 않았습니다." ;;
     3)
         err "실패(종료 코드 3): 마스킹 검증 또는 보호 저장 실패. 기존 확정 결과는 보존됩니다."
         err "  저장 위치($OUT_DIR)의 소유자·권한(700)·충돌 여부를 확인하십시오." ;;
