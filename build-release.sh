@@ -23,7 +23,7 @@ set -euo pipefail
 umask 022
 
 readonly PACKAGE_NAME=aistor-diag-analyzer
-readonly PACKAGE_VERSION=0.4.4
+readonly PACKAGE_VERSION=0.5.0
 readonly PBS_RELEASE=20261110
 readonly PBS_PYTHON=3.12.16
 readonly APP_FILES=(analyze.py aistordoctor.py r2_health.py r2_enrichment.py)
