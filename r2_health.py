@@ -14,7 +14,7 @@ import zlib
 import aistordoctor as a
 import r2_enrichment as enrichment
 
-VERSION = '0.5.0-r2'
+VERSION = '0.5.1-r2'
 SCHEMA_VERSION = '1.3-r2'
 MAX_COMPRESSED = 32 * 1024 * 1024
 MAX_EXPANDED = 64 * 1024 * 1024

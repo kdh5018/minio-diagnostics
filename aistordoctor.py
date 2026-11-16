@@ -18,7 +18,7 @@ import sys
 import time
 import uuid
 
-VERSION = '0.5.0-r1'
+VERSION = '0.5.1-r1'
 SCHEMA_VERSION = '1.1-r1'
 PARSER_VERSION = 'official-markdown-r1-2'
 POLICY_VERSION = 'r1-1'
