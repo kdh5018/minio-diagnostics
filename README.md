@@ -360,6 +360,15 @@ cd aistor-diag-analyzer-<버전>-el8-x86_64
 - 실제 RHEL·AlmaLinux와 실서버(Rocky 9.4) 실행은 하지 않았습니다. 컨테이너는 Rocky 최소 이미지 기준입니다.
 - aarch64·Ubuntu 대상은 정의만 예시로 두었고 빌드·검증하지 않았습니다.
 
+### 2026-11-16 0.4.1 고객 관점 수정
+
+- MD 엔티티 제거(CommonMark 이스케이프), 결합 IOMMU `None` 제거, 영문 코드에 한국어 라벨,
+  공개 커널·부트 경로와 공식 문서 URL 원문 표시(호스트·IP·일련번호·`host:port`는 계속 가림),
+  절대 경로 표시, `.output.lock` 제거(디렉터리 잠금), 인증서 남은 시간 기준 시각 표시, README-ko 입력·결과 옮기기 안내.
+- 배포물: `aistor-diag-analyzer-0.4.1-el8-x86_64.tar.gz` 25,193,631바이트,
+  SHA-256 `8899f458eaef753c0bca9c5ddfbe7bad4f47a27b91a828c71b335b0bf0d9401d`(소스 `c9333ee`).
+- 테스트 137개, Rocky 8·9·10 컨테이너·실자료 검증. 항목별 상태는 계획서의 "0.4.1 고객 관점 수정".
+
 ### 2026-11-16 0.4.0 개선
 
 계획·항목별 상태는 [`docs/IMPROVEMENT_PLAN.md`](docs/IMPROVEMENT_PLAN.md)에 있습니다.
