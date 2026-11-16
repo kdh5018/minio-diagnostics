@@ -179,3 +179,9 @@ R2 결합에서 Markdown 해석 오류를 공식 Markdown으로 지목, 상대 �
 
 HTML 보고서를 요약 대시보드, 서버×드라이브 격자, 검사 카드, THP·IOMMU·rlimit 비교표, 수집 오류 막대·히트맵, 고정 목차·심각도 필터 구성으로 바꿨습니다.
 판정·숫자·Markdown·JSON·종료 코드는 0.4.4와 같습니다. 상세는 [IMPROVEMENT_PLAN.md](IMPROVEMENT_PLAN.md)의 "0.5.0".
+
+### 2026-11-16 0.5.1 배포 환경 확대 검증
+
+동봉 런타임에 낡은 바이트코드 캐시가 들어 있어 런타임을 직접 실행하면 `--verify-bundle`이 실패하던 문제를 빌드에서 고쳤습니다(판정·숫자·종료 코드는 0.5.0과 같음).
+UBI·Alma·Rocky·Oracle·CentOS Stream 컨테이너 16종, 보안 제약 변형, 실제 SELinux enforcing VM 3대, Chromium·Firefox·WebKit·Edge·Chrome과 w3m·lynx에서 확인했습니다.
+배포본 README-ko에 tar·gzip, 종료 126, SELinux, 출력 위치 안내를 더했습니다. 상세는 [IMPROVEMENT_PLAN.md](IMPROVEMENT_PLAN.md)의 "0.5.1".

@@ -1,4 +1,4 @@
-# 개선 작업 계획서 (0.4.0~0.5.0)
+# 개선 작업 계획서 (0.4.0~0.5.1)
 
 - 작성: 2026-11-16, 기준 커밋 `f067c0c` (0.3.1 배포 후). 상태 갱신: 2026-11-16, 0.4.0 소스 커밋 `639d60a`
 - 범위: 0.3.1 사용·검증(10월 12일 샘플, 2026-10-14 R3 자료, Rocky 8/9/10 컨테이너)에서 드러난 개선점
@@ -395,3 +395,50 @@
 - 합성 11/16·10/15 입력을 0.4.3과 비교: JSON 동일, MD는 0.4.4의 표 칸 백슬래시 제거만 다름. 0.4.3은 11/16 단수형을 종료 코드 2로 거부(원래 버그).
 - Rocky 8.9·9.3·10.2(배포물 run-report.sh): 31/2/2, 4/2/1, 수집 오류 6, 합성 11/16 32/2/1·10/15 31/2/2 종료 코드 4 저장, 161초 결합 거부 2, 원본 해시 2/2·418/418 동일.
 - Chrome 157(배포물 출력, file://): 필터 19건·심각도 버튼·검색·키보드·JS 끔·인쇄 펼침 통과, 데스크톱·모바일 가로 넘침 없음, 외부 요청 0, 페이지·콘솔 오류 0, 주입 문자열 무력화.
+
+## 0.5.1 배포 환경 확대 검증·런타임 바이트코드 제거 (2026-11-16)
+
+판정 로직·숫자·종료 코드·120초 결합 허용치·자원 제한·마스킹은 그대로입니다. 바뀐 것은 빌드와 배포본 README-ko뿐입니다.
+
+- 발견: 0.5.0 배포물에 동봉 런타임의 `encodings/__pycache__/*.pyc` 3개가 들어 있었고, 빌드가 원본 시각을 바꿔 이 캐시가 낡은 상태였습니다.
+  동봉 `python3`을 `-B` 없이 직접 한 번 실행하면 캐시가 다시 써지고, 그 뒤 `--verify-bundle`이 체크섬 불일치(종료 코드 5)로 실패했습니다.
+  `run-report.sh` 자체는 항상 `-B`로 실행하므로 이 도구만 쓰면 발생하지 않습니다.
+- 수정: `build-release.sh`가 런타임 안의 `__pycache__`·`.pyc`를 모두 지웁니다. `test_shell_release.py`는 낡은 pyc를 넣은 가짜 런타임으로
+  빌드한 뒤 배포물 어디에도 pyc가 없는지 확인합니다. 0.5.0 대비 파일 차이는 pyc 3개 제거, README-ko·RELEASE-INFO·SHA256SUMS·버전 두 줄뿐입니다.
+- README-ko: tar·gzip이 필요(없으면 다른 곳에서 풀어 복사, 읽기 전용 폴더에서도 실행 가능), 종료 126 "Permission denied"는 noexec 또는
+  SELinux `user_u` 사용자에 `user_exec_content=off`인 경우(감사 로그에 남지 않을 수 있음), SELinux enforcing(targeted)은 설정 변경 없이 동작하며
+  정책·boolean을 바꾸지 말 것, 출력 위치는 700 권한을 지킬 수 있어야 함(Windows 공유 폴더는 종료 코드 3).
+- 커밋 `c1144dc`(빌드·테스트·README-ko), `9621f40`(0.5.1), `12b5389`(README-ko). 배포물 `dist/aistor-diag-analyzer-0.5.1-el8-x86_64.tar.gz`
+  25,190,434바이트, SHA-256 `bc28d0d5595eb82af2f3db5625a6ec5b237357c2c2e620d1051b56d57fa8c16b`(소스 `12b5389`, dirty=no). 0.3.0~0.5.0 해시 그대로.
+- git archive 깨끗한 사본 + 0.5.1 배포물 지정: `run_tests` 통과(건너뜀 3), `test_shell_release` 통과(건너뜀 0), `test_r2` 통과(건너뜀 6).
+  합성 11/16·10/15 결과 JSON·MD·HTML은 0.5.0과 버전·시각 문자열 외 동일.
+
+### 검증 결과
+
+컨테이너 16종(Python 없음, `--network none`, 비root): UBI 8.10·9.9·10.3 minimal·micro, AlmaLinux 8.10·9.8·10.2, Rocky 8.9·9.3·10.2,
+Oracle Linux 8.10·9.8 slim·CentOS Stream 9·10(`--allow-unverified-os`). 모두 `--check --verify-bundle` 0, 합성 11/16 32/2/1 수집 오류 6 종료 코드 4,
+10/15 31/2/2 종료 코드 4, 161초 결합 거부 2, 결과 폴더 700·파일 600. Oracle·CentOS Stream은 옵션 없이 종료 코드 5(지원 목록 밖, 의도된 동작).
+minimal·micro·slim 이미지는 tar·gzip이 없어 다른 곳에서 푼 폴더를 읽기 전용으로 붙여 실행했습니다.
+
+| 보안 제약(Rocky 9.3, 읽기 전용 rootfs·cap-drop ALL·no-new-privileges) | 결과 |
+|---|---|
+| 배포 폴더 읽기 전용, umask 077·027 | 통과, 숫자 동일 |
+| /tmp 또는 HOME noexec에 압축 해제 | `./run-report.sh`는 셸이 126 "Permission denied", `bash run-report.sh`는 noexec 안내와 종료 코드 5 |
+| passwd에 없는 UID 12345 | 동작. 입력 폴더 700이면 소유자·현재 UID를 밝혀 종료 코드 2 |
+| 다른 사용자 소유 0600 입력 | 종료 코드 2, "원본 파일의 권한은 바꾸지 마십시오" 안내 |
+| 출력 위치가 drvfs/9p(700 강제 불가) | 종료 코드 3, 기존 결과 보존 |
+| ELF 5개 readelf | TEXTREL 0, 실행 가능 스택 0(GNU_STACK RW), RELRO·BIND_NOW, RPATH `$ORIGIN/../lib` |
+
+실제 SELinux enforcing(targeted) VM 3대(Docker 안 QEMU/KVM, GenericCloud 이미지): AlmaLinux 9.8(5.14)·8.10(4.18), Rocky 10.2(6.12).
+`unconfined_t` 로그인으로 홈(`user_home_t`)·/tmp(`user_tmp_t`)·umask 077/027·`deny_execmem=on`·`selinuxuser_execmod=off`·`selinuxuser_execstack=off`
+모두 같은 숫자로 통과, 런타임 직접 실행 뒤 `--verify-bundle` 0. 제한 사용자 `user_u:user_r:user_t`도 홈·/tmp 통과.
+`user_exec_content=off`에서는 126 "Permission denied"(정책 의도대로, dontaudit라 AVC 0). 세 VM 모두 AVC 0건.
+
+브라우저(Playwright 1.58.2, 0.5.1 출력, file://): Chromium 145·Firefox 146·WebKit 26·Edge·Chrome에서 `verify_browser.cjs` 모두 통과
+(필터·심각도 버튼·검색·키보드·JS 끔·인쇄 펼침·가로 넘침 없음·외부 요청 0·주입 문자열 무력화), 11/16·10/15 둘 다.
+CSS와 JS를 모두 뺀 사본에서도 카드 전부와 통과·오류·경고 숫자가 글자로 보임. w3m 0.5.3·lynx 2.9.0 텍스트 출력에 "통과 32 · 오류 2 · 경고 1"·"통과 31 · 오류 2 · 경고 2".
+인쇄 PDF: Chromium·Edge·Chrome(Playwright), Firefox(WebDriver BiDi `browsingContext.print`) 모두 16쪽, 접힌 근거 포함, 필터 숨김.
+- `verify_browser.cjs`: `BROWSER=chrome|msedge|chromium|firefox|webkit` 선택, CSS·JS 없는 사본 확인 추가.
+  WebKit에서 Playwright `:visible`이 닫힌 `<details>` 안 요소를 CSS와 무관하게 숨김으로 보는 문제(Playwright 자체 WebKit 우회 규칙)가 있어
+  인쇄 펼침은 실제 배치(상자 크기·`checkVisibility`)로 셉니다. 인쇄 CSS를 지운 사본에서는 세 엔진 모두 실패함을 확인했습니다.
+- 남은 범위: 구독된 실제 RHEL 호스트(UBI로 대신), 실제 NFS, 실제 프린터, macOS Safari(Windows의 Playwright WebKit으로 대신), 구형 브라우저 버전, 실서버 자료.

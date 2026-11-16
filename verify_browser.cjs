@@ -4,7 +4,23 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
-const { chromium } = require('playwright');
+const playwright = require('playwright');
+
+// BROWSER=chrome(기본)|msedge|chromium|firefox|webkit
+const KIND = process.env.BROWSER || 'chrome';
+function launch() {
+  if (KIND === 'chrome' || KIND === 'msedge') return playwright.chromium.launch({ channel: KIND, headless: true });
+  if (!['chromium', 'firefox', 'webkit'].includes(KIND)) throw new Error('unknown BROWSER ' + KIND);
+  return playwright[KIND].launch({ headless: true });
+}
+
+// Playwright의 :visible은 WebKit에서 닫힌 <details> 안의 요소를 CSS와 무관하게 항상 숨김으로 본다(엔진 우회 규칙).
+// 인쇄 펼침은 실제 배치(상자 크기·checkVisibility)로 센다.
+const laidOutDetailsChildren = target => target.evaluate(() => {
+  const kids = [...document.querySelectorAll('details > :not(summary)')];
+  const shown = kids.filter(el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(el).visibility === 'visible' && (!el.checkVisibility || el.checkVisibility()); });
+  return { shown: shown.length, all: kids.length };
+});
 
 async function main() {
   const [htmlPath, outputDirectory, hostileHtmlPath] = process.argv.slice(2);
@@ -13,7 +29,7 @@ async function main() {
   }
   assert((await fs.stat(outputDirectory)).isDirectory());
   const report = JSON.parse(await fs.readFile(path.join(path.dirname(htmlPath), 'aistor-diag-report.json'), 'utf8'));
-  const browser = await chromium.launch({ channel: 'chrome', headless: true });
+  const browser = await launch();
   const externalRequests = [];
   const pageErrors = [];
   const consoleErrors = [];
@@ -87,8 +103,11 @@ async function main() {
     assert.equal(await page.locator('.filters').isVisible(), false);
     assert.equal(await page.locator('article:visible').count(), report.findings.length);
     // 0.5.0: 인쇄 시 접힌 근거·부록이 모두 펼쳐져야 한다.
-    assert.equal(await page.locator('details > :not(summary):visible').count(), await page.locator('details > :not(summary)').count());
+    { const d = await laidOutDetailsChildren(page); assert.equal(d.shown, d.all); }
     await page.screenshot({ path: path.join(outputDirectory, 'print.png'), fullPage: true });
+    // 인쇄 PDF는 Chromium 계열만 지원(Playwright page.pdf). 다른 엔진은 인쇄 매체 화면으로 대신한다.
+    const printPdf = KIND === 'firefox' || KIND === 'webkit' ? 'not_supported_by_engine' : 'written';
+    if (printPdf === 'written') await page.pdf({ path: path.join(outputDirectory, 'print.pdf'), printBackground: true });
     await page.emulateMedia({ media: 'screen' });
     // 0.5.0: 심각도 버튼(전체/오류/경고/통과)은 data-sev 기준으로 카드를 거른다.
     const severityCases = [];
@@ -115,8 +134,27 @@ async function main() {
     assert.equal(await plain.locator('#dashboard').isVisible(), true);
     await plain.screenshot({ path: path.join(outputDirectory, 'nojs.png'), fullPage: true });
     await plain.emulateMedia({ media: 'print' });
-    assert.equal(await plain.locator('details > :not(summary):visible').count(), await plain.locator('details > :not(summary)').count());
+    { const d = await laidOutDetailsChildren(plain); assert.equal(d.shown, d.all); }
     await plain.screenshot({ path: path.join(outputDirectory, 'nojs-print.png'), fullPage: true });
+    // 구형 엔진 대비: CSS를 무시(style 블록 제거)하고 JS도 끈 사본에서 카드·핵심 숫자가 모두 글자로 보이는지.
+    const html = await fs.readFile(htmlPath, 'utf8');
+    const bare = html.replace(/<style[\s\S]*?<\/style>/gi, '').replace(/\sstyle="[^"]*"/gi, '');
+    assert(!/<style/i.test(bare));
+    const barePath = path.join(outputDirectory, 'nocss-copy.html');
+    await fs.writeFile(barePath, bare);
+    const plain2 = await noJs.newPage();
+    await plain2.goto(pathToFileURL(barePath).href, { waitUntil: 'load' });
+    assert.equal(await plain2.locator('article:visible').count(), report.findings.length);
+    const bareText = await plain2.locator('body').innerText();
+    const s = report.official_summary || {};
+    const keyNumbers = {};
+    for (const [label, value] of [['통과', s.passed], ['오류', s.errors], ['경고', s.warnings]]) {
+      if (value === undefined) continue;
+      keyNumbers[label] = new RegExp(label + '\\s*' + value + '(?!\\d)').test(bareText);
+      assert(keyNumbers[label], 'no-CSS text lacks ' + label + ' ' + value);
+    }
+    await plain2.screenshot({ path: path.join(outputDirectory, 'nocss-nojs.png'), fullPage: false });
+    await fs.unlink(barePath);
     await noJs.close();
     await page.goto(pathToFileURL(hostileHtmlPath).href, { waitUntil: 'load' });
     assert.equal(await page.locator('img,iframe,object,embed').count(), 0);
@@ -126,7 +164,7 @@ async function main() {
     assert.equal(pageErrors.length, 0);
     assert.equal(consoleErrors.length, 0);
     const result = {
-      browser: browser.version(), protocol: 'file:', toolVersion: report.tool_version,
+      engine: KIND, browser: browser.version(), protocol: 'file:', printPdf, noCssNoJs: { articlesVisible: 'passed', keyNumbers }, toolVersion: report.tool_version,
       inputGeneration: path.basename(path.dirname(htmlPath)), filters: cases,
       search: 'passed', severityButtons: severityCases, noJs: 'passed', printExpandsDetails: 'passed', keyboardDisclosure: hasDisclosure ? 'passed' : 'not_applicable', printLayout: 'passed',
       hostileMarkup: 'passed', desktop, mobile, externalRequests, pageErrors, consoleErrors,
