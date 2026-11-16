@@ -183,6 +183,75 @@ WSL 배포 이름은 자신의 환경에서 확인하고 다음 경로의 `<dist
 - 전체 요청의 인수 완료 조건은 R3 파일의 읽기 전용 접근과 Windows 브라우저 검증을 확보하는 것입니다.
   패키지 설치나 보호 권한 우회로 이를 대체하지 않습니다.
 
+## 2026-11-16 현황: Python 없는 서버용 배포본
+
+위 기록은 그대로 두고 이번 변경만 추가합니다. 분석 엔진(`analyze.py`·R1·R2)은 바꾸지 않았습니다.
+
+### 배포본 실행 (`run-report.sh`)
+
+고객 서버에 Python이나 패키지를 설치하지 않고, 런타임을 동봉한 폴더형 tar.gz를 풀어 실행합니다.
+
+```bash
+tar xzf aistor-diag-analyzer-<버전>-el8-x86_64.tar.gz
+cd aistor-diag-analyzer-<버전>-el8-x86_64
+./run-report.sh --check --verify-bundle
+./run-report.sh --official-report /경로/공식보고서.md
+./run-report.sh --official-report /경로/공식보고서.md --health /경로/원본.json.gz --allow-partial
+```
+
+- 스크립트 위치 기준으로 동작해 어느 디렉터리에서 호출해도 됩니다. 공백·한글 경로를 지원하고 `eval`을 쓰지 않습니다.
+- 기본 출력 위치는 `~/aistor-diag-output`이며 `--out-dir`로 바꿉니다. 상대 경로는 호출한 위치 기준입니다.
+- R2(`--health`)에서는 `--fail-on-priority`·`--lang`·`--mask basic`을 실행 전에 거부합니다(종료 코드 2).
+- 분석기의 종료 코드 0~4를 그대로 돌려줍니다. 4(부분 분석)로 저장된 경우에도 결과 경로를 안내합니다.
+  `--force`는 사용자가 지정한 경우에만 전달합니다.
+- 사전 점검: OS(ID·주 버전)·CPU 아키텍처·glibc·동봉 런타임 실행(noexec 포함)·입력 파일·출력 폴더 권한(0700, 소유자)·
+  심볼릭 링크를 확인합니다. 지원하지 않는 환경은 설치를 시도하지 않고 종료 코드 **5**로 안내합니다.
+- `--use-system-python`은 검증된 시스템 python3(3.9 이상)를 쓸 때만 선택합니다. 기본은 동봉 런타임입니다.
+
+### 배포본 빌드 (`build-release.sh`, 개발 환경 전용)
+
+```bash
+./build-release.sh --list-targets
+./build-release.sh --os el8 --arch x86_64      # 결과: dist/
+```
+
+- 대상은 OS·아키텍처 인자로 고릅니다. 현재 활성 대상은 `el8-x86_64`(RHEL·Rocky·AlmaLinux 8/9/10, glibc 2.28 이상) 하나입니다.
+  aarch64·Ubuntu는 스크립트 안의 예시 블록을 채워 추가합니다(미빌드·미검증).
+- 런타임: python-build-standalone 20261110, CPython 3.12.16 (`install_only_stripped`), SHA-256 고정 검증.
+  런타임 요구 glibc 최대 기호는 2.17입니다. 테스트·IDLE·tkinter·pip 등은 제거합니다.
+- 커밋되지 않은 변경이 있으면 빌드를 거부합니다. tar.gz는 정렬·소유자 0·고정 mtime으로 결정적으로 만듭니다.
+- 배포본에는 `run-report.sh`, `app/`(분석기 4개 파일), `runtime/`, `RELEASE-INFO`, `README-ko.txt`,
+  `SHA256SUMS`, `licenses/`만 들어갑니다. `.git`, 인증정보, 진단 원본, 생성 보고서, 테스트·백업·로그,
+  내부 계약서, 내부 경로 문자열이 있으면 빌드가 실패합니다.
+
+### 이번 검증 결과 (2026-11-16)
+
+- 테스트: 기존 83개 + 신규 `test_shell_release.py` 19개 = 102개.
+  - WSL Python 3.14.4, 10월 12일 샘플과 배포본 지정 시: 102개 통과, 건너뜀 0.
+  - 동봉 런타임(3.12.16)으로 Rocky 8.9·9.3 컨테이너: 102개 중 99개 통과, 3개 건너뜀
+    (최소 이미지에 `find`·`xargs`가 없어 빌드 테스트 3개 제외). Rocky 10.2: 102개 통과, 건너뜀 0.
+- 배포물: `aistor-diag-analyzer-0.3.0-el8-x86_64.tar.gz`, 25,158,944 bytes,
+  SHA-256 `18522fe1620fb8ecbc92e83fad331c2646e338854b7f00e16037edd4ea1a1b1d`, 소스 커밋 `6215c29` (dirty=no).
+  배포물은 저장소에 넣지 않습니다(`dist/`는 추적 제외).
+- 깨끗한 환경: Docker `rockylinux:8-minimal`(8.9, glibc 2.28)·`9-minimal`(9.3, glibc 2.34)·
+  `rockylinux/rockylinux:10-minimal`(10.2, glibc 2.39). `python3`·`python`·platform-python·python RPM 없음,
+  `--network none`, 비root uid 1500. 이미지에는 tar·gzip만 추가했습니다(실서버 기본 포함 도구).
+  - 세 환경 모두 `--check --verify-bundle` 0, 공식 단독 0, 원본 결합 `--allow-partial` 4(결과 경로 안내).
+  - 생성 세대 0700, HTML·MD·JSON·manifest 0600, manifest SHA-256 일치.
+  - 공식 요약 31/2/2, 서버 3, 드라이브 12, 수집 오류 기록 6행. 입력 경로는 공백·한글 포함 읽기 전용 마운트.
+- 원본 보존: 10월 12일 샘플 두 파일의 SHA-256이 작업 전후 동일합니다.
+- 브라우저(P5): Windows Chrome 157 + Playwright로 동봉 런타임이 만든 최신 결합 HTML을 `file://`로 열어
+  `verify_browser.cjs`를 실행했습니다. 필터 18개, 검색, 키보드 펼치기, 인쇄 표시, 악성 마크업 합성 보고서,
+  데스크톱·모바일 가로 넘침 없음, 외부 요청·페이지 오류·콘솔 오류 0건. 생성 보고서와 화면 이미지는 확인 후 삭제했습니다.
+
+### 남은 항목
+
+- P4: 2026-10-14 R3 자료를 받지 못해 미완료입니다. 다른 자료로 대체하지 않았습니다.
+- 라이선스: 프로젝트 라이선스와 동봉 런타임의 제3자 고지 정리가 미결입니다(`LICENSE` 파일 없음,
+  `RELEASE-INFO`의 `LICENSE_STATUS=pending`). 배포 전 결정이 필요합니다.
+- 실제 RHEL·AlmaLinux와 실서버(Rocky 9.4) 실행은 하지 않았습니다. 컨테이너는 Rocky 최소 이미지 기준입니다.
+- aarch64·Ubuntu 대상은 정의만 예시로 두었고 빌드·검증하지 않았습니다.
+
 ## Git 관리 범위
 
 분석기 코드·테스트·공개 사용 안내만 추적합니다.
