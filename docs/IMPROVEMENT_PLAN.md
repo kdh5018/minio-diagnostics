@@ -442,3 +442,15 @@ CSS와 JS를 모두 뺀 사본에서도 카드 전부와 통과·오류·경고 
   WebKit에서 Playwright `:visible`이 닫힌 `<details>` 안 요소를 CSS와 무관하게 숨김으로 보는 문제(Playwright 자체 WebKit 우회 규칙)가 있어
   인쇄 펼침은 실제 배치(상자 크기·`checkVisibility`)로 셉니다. 인쇄 CSS를 지운 사본에서는 세 엔진 모두 실패함을 확인했습니다.
 - 남은 범위: 구독된 실제 RHEL 호스트(UBI로 대신), 실제 NFS, 실제 프린터, macOS Safari(Windows의 Playwright WebKit으로 대신), 구형 브라우저 버전, 실서버 자료.
+
+## 0.5.2 교차검증 리뷰 반영 (2026-11-17)
+
+- 범위: 0.5.1 HTML 보고서 교차검증 §4 확정 항목만. 판정 로직·수치·카드 수는 그대로.
+- IOMMU 자체 점검 사유 코드 분리: `proc_cmdline_missing`, `explicit_flags_absent_in_cmdline`, 기존 `explicit_flags_unobserved_or_ambiguous`(일부만 명시·값 충돌). 결과 식은 그대로.
+- 수집 오류 자체 점검은 `approval_required=False`(설정 변경 대상 아님). 자체 점검 카드는 '마스킹된 근거' 대신 원본 gzip 관측값(표시용, JSON에 넣지 않음).
+- 주의: 해설 문구에 경로를 쓸 때 경로 바로 뒤에 조사를 붙이면(`/proc/cmdline으로`) 공개 경로 허용 목록과 맞지 않아 `identifier-NNN`으로 마스킹된다. 경로 뒤에 공백을 둔다.
+- 테스트: `test_r2.py` `Review052Tests` 14건(201 형태 합성: 공식 32/2/1, 자체 4/0/2/1, 우선순위 P2 3·P3 1·미분류 2, 카드 6장 고정) 추가. test_r2 81건(건너뜀 6), run_tests 59건(건너뜀 3), git archive 사본 + 0.5.2 배포물로 run_tests·test_shell_release·test_r2 통과.
+- 커밋 `b82870b`(수정), `f72895d`(0.5.2). 배포물 `dist/aistor-diag-analyzer-0.5.2-el8-x86_64.tar.gz` 25,197,280바이트,
+  SHA-256 `0e6d3f3d9ad7446e3614e7f254bc00a6f0163cccb927607b5d8aa3bed582b3bc`. dist에는 최신만 남김.
+- 201: 11/16 원본과 시험 스크립트가 11/16 정리 때 삭제되어 재실행 불가. 대신 201의 10/15 훈련 수집 쌍으로 0.5.1(커밋 12b5389에서 재빌드, SHA-256 원본과 동일)과 0.5.2를 같은 인자로 실행해 비교:
+  종료 코드 4/4, 공식 30/4/1, 자체 통과 3·경고 2·미평가 2, 규칙별 결과·finding 우선순위·카드 9장 모두 동일. 확정 항목은 새 HTML에서 항목별로 확인.

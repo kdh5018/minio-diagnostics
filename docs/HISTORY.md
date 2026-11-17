@@ -185,3 +185,9 @@ HTML 보고서를 요약 대시보드, 서버×드라이브 격자, 검사 카�
 동봉 런타임에 낡은 바이트코드 캐시가 들어 있어 런타임을 직접 실행하면 `--verify-bundle`이 실패하던 문제를 빌드에서 고쳤습니다(판정·숫자·종료 코드는 0.5.0과 같음).
 UBI·Alma·Rocky·Oracle·CentOS Stream 컨테이너 16종, 보안 제약 변형, 실제 SELinux enforcing VM 3대, Chromium·Firefox·WebKit·Edge·Chrome과 w3m·lynx에서 확인했습니다.
 배포본 README-ko에 tar·gzip, 종료 126, SELinux, 출력 위치 안내를 더했습니다. 상세는 [IMPROVEMENT_PLAN.md](IMPROVEMENT_PLAN.md)의 "0.5.1".
+
+### 2026-11-17 0.5.2 교차검증 리뷰 반영(표시만)
+
+검증팀(Arbiter·Atlas·Vector) 교차검증 문서 §4의 확정 항목(A1~A4, B2~B6, C1~C4, D1~D4·D7, 부록 중복 행)만 반영했습니다.
+판정·숫자·종료 코드·120초 결합 허용치·자원 제한·마스킹은 0.5.1과 같습니다. 보류 항목(B1 규칙 조정, THP·IOMMU 이중 집계, 자체 통과 카드)은 넣지 않았습니다.
+상세는 [IMPROVEMENT_PLAN.md](IMPROVEMENT_PLAN.md)의 "0.5.2".
