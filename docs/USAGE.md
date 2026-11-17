@@ -6,8 +6,8 @@
 
 | 항목 | 내용 |
 |---|---|
-| 최신 배포본 | 0.5.2 (`el8-x86_64`: RHEL·Rocky·AlmaLinux 8/9/10, x86_64). 런타임 동봉, 서버에 Python 설치 불필요 |
-| 분석기 버전 | R1 `0.5.2-r1`(공식 Markdown), R2 `0.5.2-r2`(원본 gzip 결합, JSON 스키마 `1.3-r2`) |
+| 최신 배포본 | 0.5.3 (`el8-x86_64`: RHEL·Rocky·AlmaLinux 8/9/10, x86_64). 런타임 동봉, 서버에 Python 설치 불필요 |
+| 분석기 버전 | R1 `0.5.3-r1`(공식 Markdown), R2 `0.5.3-r2`(원본 gzip 결합, JSON 스키마 `1.3-r2`) |
 | 검증 | Rocky 8·9·10 최소 컨테이너(Python 없음, 네트워크 차단, 비root), 2026-10-12 샘플, 2026-10-14 R3 실자료 |
 | 라이선스 | 사내·고객사 전용(`LICENSE`). 런타임 제3자 고지는 배포본 `licenses/` |
 | 개선 계획·상태 | [`docs/IMPROVEMENT_PLAN.md`](IMPROVEMENT_PLAN.md) |
@@ -79,6 +79,8 @@ python3 analyze.py --health /path/to/approved-data.json.gz --official-report /pa
 THP 자체 점검은 공식 `sys.mem.thp` Resolution 권장값(enabled=madvise, defrag=defer+madvise 또는 madvise, max_ptes_none=0)과
 관측값을 비교합니다(0.4.0부터, 이전 0.3.x는 never 통과 기준). 공식 판정이 우선하며 실제 지연·장애나 자동 조치를 의미하지 않습니다.
 수집 오류는 고정 분류("대상 / 종류")로만 집계하고 원문은 내보내지 않습니다. `sys.errors`가 없으면 오류 행 수는 최소값으로 표시합니다.
+0.5.3부터 수집 오류 기록 자체 점검은 `정보`(ⓘ) 등급입니다. 경고·실패 수와 우선순위(P2)에 넣지 않으며, 수집 오류만으로는 `--fail-on-priority P2`가 걸리지 않습니다. JSON `custom_rule_counts`에 `info`가 생깁니다.
+HTML 검사 결과 목록의 공식 버튼(오류·경고)은 mc 보고서 요약 숫자와 같고, 자체 점검은 따로 셉니다. THP(`r2.thp.mode`↔`sys.mem.thp`)·IOMMU(`r2.iommu.consistency`↔`sys.mem.iommu`) 자체 결과는 공식 카드가 있으면 그 안의 보조 정보로 표시합니다.
 IOMMU 옵션 부재를 off로 간주하지 않습니다. pool/set 인덱스만으로 quorum·물리 장애 도메인을 계산하지 않습니다.
 인증서는 수집 시점 또는 명시한 `--as-of`에서 유효기간만 점검합니다. 신뢰체인·SAN·만료 임박 정책은 미지원입니다.
 Markdown 결합 시 알려진 Server/Endpoint 표와 수집 시각(허용 차이 120초)을 비교합니다.

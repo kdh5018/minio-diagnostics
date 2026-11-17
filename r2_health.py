@@ -14,7 +14,7 @@ import zlib
 import aistordoctor as a
 import r2_enrichment as enrichment
 
-VERSION = '0.5.2-r2'
+VERSION = '0.5.3-r2'
 SCHEMA_VERSION = '1.3-r2'
 MAX_COMPRESSED = 32 * 1024 * 1024
 MAX_EXPANDED = 64 * 1024 * 1024
@@ -333,7 +333,8 @@ def report(body, documents=1, official_text=None, as_of=None, mask='strict'):
     for c in checks:
         if c['rule_result'] == 'pass':
             continue
-        r['findings'].append(dict(c, assessment_reason=c['reason'], priority='P2' if c['rule_result'] else 'unclassified',
+        # 0.5.3: 경고·실패만 P2. 정보(수집 오류 기록)와 미평가는 미분류.
+        r['findings'].append(dict(c, assessment_reason=c['reason'], priority='P2' if c['rule_result'] in ('warning', 'fail') else 'unclassified',
             observed='자체 점검 결과: ' + a.result_text(c['rule_result']) + ' / ' + a.label(c['reason']), detail=c['condition'],
             evidence_blocks=[], recommendation=COLLECTION_ADVICE if c['rule_id'] == 'r2.collection.errors' else
             '원본 관측과 실제 대상을 읽기 전용으로 대조하십시오. 자동 조치는 수행하지 않습니다.',
@@ -659,14 +660,14 @@ def health_dashboard(r, n):
         a.tile('info', '서버 기록', len(n['servers'])),
         a.tile('error' if states['offline'] else 'info', '드라이브 기록', len(n['drives']),
                'ok %d · offline %d · 미확인 %d' % (states['ok'], states['offline'], states['unknown'])),
-        a.tile('warning' if count else 'info', '수집 오류 행', count), a.esc(a.plain(a.label(link))))
+        a.tile('info', '수집 오류 행', count, '정보 등급(경고 아님)' if count else ''), a.esc(a.plain(a.label(link))))
 
 
 def html_report(r):
     v = view(r)
     n = r.get('facts', {}).get('health')
     # 필터 값(value)은 data-status와 같은 원래 문자열, 보이는 글자는 한국어로 둔다.
-    labels = sorted({(f['official_status'], a.status_text(f)) for f in v['findings'] if f['origin'] == 'custom_rule'})
+    labels = sorted({(f['official_status'], a.status_text(f)) for f, _ in a.card_groups(v['findings']) if f['origin'] == 'custom_rule'})
     sections, extra, raw = [], '', []
     if isinstance(n, dict):
         extra = health_dashboard(r, n)

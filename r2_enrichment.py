@@ -210,15 +210,17 @@ def system_rules(n):
         '부재를 off로 해석하지 않음. 공식 sys.mem.iommu 검사의 오류 판정과 별개이며 하드웨어 지원·I/O 장애는 판정하지 않음', '$.sys.config')
     collection = n['collection']
     count, observed = collection['reported_error_count'], collection.get('observed_error_rows')
+    # 0.5.3: 수집 오류 기록은 설정 판정이 아니라 수집 범위 표시이므로 경고가 아닌 정보(info)로 둔다.
     if count:
-        result, reason = 'warning', 'recognized_error_fields_only'
+        result, reason = 'info', 'recognized_error_fields_only'
     elif count == 0:
         result, reason = 'pass', 'recognized_error_fields_only'
     elif observed:
-        result, reason = 'warning', 'lower_bound_error_rows_observed'
+        result, reason = 'info', 'lower_bound_error_rows_observed'
     else:
         result, reason = None, 'error_coverage_unavailable'
     add('r2.collection.errors', '제공된 수집 오류 기록', result, reason, ['sys.errors'],
-        '알려진 sys 배열의 비어 있지 않은 error/errors만 집계. sys.errors 부재나 형식 이상 행이 있으면 관측 행 수는 최소값이며, 이때 0건이면 미평가. '
-        '기록 부재는 전체 수집 성공을 증명하지 않음', '$.sys', 'r2-system-2')
+        '알려진 sys 배열의 비어 있지 않은 error/errors만 집계. 오류 행이 있으면 정보(수집 범위 표시)로 기록하며 경고·실패로 세지 않음. '
+        'sys.errors 부재나 형식 이상 행이 있으면 관측 행 수는 최소값이며, 이때 0건이면 미평가. '
+        '기록 부재는 전체 수집 성공을 증명하지 않음', '$.sys', 'r2-system-3')
     return rules

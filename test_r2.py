@@ -192,7 +192,7 @@ class R2Tests(unittest.TestCase):
         r = h.report(body)
         self.assertEqual(r['facts']['health']['collection']['reported_error_count'], 1)
         self.assertNotIn('canary-password', json.dumps(r))
-        self.assertEqual(next(c for c in r['check_results'] if c['rule_id'] == 'r2.collection.errors')['rule_result'], 'warning')
+        self.assertEqual(next(c for c in r['check_results'] if c['rule_id'] == 'r2.collection.errors')['rule_result'], 'info')  # 0.5.3
 
     def test_topology_not_quorum(self):
         body = copy.deepcopy(SYNTHETIC)
@@ -410,7 +410,7 @@ class R2Tests(unittest.TestCase):
         self.assertEqual(collection['count_basis'], 'lower_bound')
         self.assertEqual(collection['incomplete_reasons'], ['sys_errors_missing_or_not_list', 'malformed_records:cpus'])
         rule = next(c for c in r['check_results'] if c['rule_id'] == 'r2.collection.errors')
-        self.assertEqual((rule['rule_result'], rule['reason']), ('warning', 'lower_bound_error_rows_observed'))
+        self.assertEqual((rule['rule_result'], rule['reason']), ('info', 'lower_bound_error_rows_observed'))  # 0.5.3
         self.assertEqual(r['run_status'], 'partial')
         self.assertIn('collection error count incomplete', r['parser_errors'])
         self.assertIn('오류가 기록된 행 수: <strong>최소 2 (전체 수 미확정)</strong>', h.observations_html(r))
@@ -787,14 +787,16 @@ class Html050Tests(unittest.TestCase):
 
     def test_cards_separate_official_and_own_commentary(self):
         page = self.page
-        self.assertEqual(page.count('<article '), len(self.r['findings']))
+        groups = a.card_groups(self.r['findings'])
+        self.assertEqual(page.count('<article '), len(groups))
         self.assertIn('공식 판정 <small>(mc 보고서)</small>', page)
         self.assertIn('자체 점검 판정 <small>(이 도구, 공식 판정 아님)</small>', page)
         self.assertIn('이 도구의 해설 <small>(공식 판정과 별개)</small>', page)
-        sev = re.findall(r'<article class="card sev-(\w+)" data-sev="\1"', page)
-        self.assertEqual(len(sev), len(self.r['findings']))
-        order = {'error': 0, 'warning': 1, 'unknown': 2, 'passed': 3}
-        self.assertEqual([order[s] for s in sev], sorted(order[s] for s in sev))  # 오류·경고 우선
+        sev = re.findall(r'<article class="card sev-(\w+)" data-sev="(own-)?\1"', page)
+        self.assertEqual(len(sev), len(groups))
+        order = {'error': 0, 'warning': 1, 'unknown': 2, 'info': 3, 'passed': 4}
+        keys = [(bool(own), order[s]) for s, own in sev]
+        self.assertEqual(keys, sorted(keys))  # 공식 카드 먼저, 각각 오류·경고 우선
 
     def test_works_without_js_and_expands_for_print(self):
         page = self.page
@@ -912,6 +914,76 @@ def card_texts(page):
     return re.findall(r'<article class="card.*?</article>', page, flags=re.S)
 
 
+class Review053Tests(unittest.TestCase):
+    """0.5.3: 검사 결과 목록의 공식 숫자는 mc 요약과 같고, 자체 점검은 따로 센다."""
+
+    def setUp(self):
+        line, checks, _ = Replay050Tests.CASES['1116']
+        self.r = h.report(body_201(), 1, replay_md(line, checks))
+        self.page = h.html_report(self.r)
+        self.cards = card_texts(self.page)
+
+    def buttons(self, page=None):
+        bar = re.search(r'<div class="sevbtns".*?</div>', page or self.page).group(0)
+        return {k: int(n) for k, n in re.findall(r'data-sev="([^"]*)"[^>]*>(?:<span[^>]*>[^<]*</span>)?[^<]*?(\d+)', bar)}
+
+    def test_official_buttons_match_mc_summary(self):
+        b = self.buttons()
+        s = self.r['official_summary']
+        self.assertEqual((b['error'], b['warning']), (s['errors'], s['warnings']))  # 2 · 1
+        self.assertEqual(b['own-info'], 1)
+        self.assertNotIn('own-warning', b)  # THP 자체 경고는 공식 THP 카드에 합쳐짐
+        self.assertIn('공식 판정 카드: 오류 2 · 경고 1 (mc 보고서 요약: 통과 32 · 오류 2 · 경고 1)', self.page)
+        self.assertIn('자체 점검(이 도구, 공식 숫자에 더하지 않음): 통과 4 · 실패 0 · 경고 1 · 미평가 1 · 정보 1.', self.page)
+        self.assertEqual(len(re.findall(r'data-sev="warning"', self.page)), 2)  # 버튼 1 + 카드 1
+
+    def test_thp_iommu_merged_into_official_cards(self):
+        thp = [c for c in self.cards if 'Transparent Huge Pages' in c or 'THP' in re.search(r'<h3>(.*?)</h3>', c).group(1)]
+        self.assertEqual(len(thp), 1)
+        self.assertIn('data-sev="warning"', thp[0])
+        self.assertIn('자체 점검 보조 정보: THP', thp[0])
+        self.assertIn('server-0001: enabled=always, defrag=madvise, max_ptes_none=511', thp[0])
+        iommu = [c for c in self.cards if '자체 점검 보조 정보: 명시적 IOMMU' in c]
+        self.assertEqual(len(iommu), 1)
+        self.assertIn('data-sev="error"', iommu[0])
+        self.assertIn('자체 결과: 미평가', iommu[0])
+        self.assertEqual(sum('자체 점검 판정 <small>' in c for c in self.cards), 1)  # 수집 오류만 따로
+
+    def test_collection_errors_info_not_warning(self):
+        card = next(c for c in self.cards if '설정 변경 대상이 아니라' in c)
+        self.assertIn('data-sev="own-info"', card)
+        self.assertIn('class="card sev-info"', card)
+        self.assertIn('우선순위 해당 없음(정보)', card)
+        f = next(f for f in self.r['findings'] if f.get('rule_id') == 'r2.collection.errors')
+        self.assertEqual((f['rule_result'], f['priority'], f['approval_required']), ('info', 'unclassified', False))
+        self.assertIn('id="collection"', self.page)  # 수집 오류 섹션은 유지
+        self.assertIn('정보 등급(경고 아님)', self.page)
+        self.assertNotIn('r2.collection.errors', [x['rule_id'] for x in self.r['findings'] if x['priority'] == 'P2' and x.get('rule_id')])
+
+    def test_dashboard_priority_and_appendix_consistent(self):
+        tiles = dict(re.findall(r'<div class="tile-k">(P\d|미분류)</div><div class="tile-v">(\d+)</div>', self.page))
+        self.assertEqual(tiles, {'P1': '0', 'P2': '1', 'P3': '1', 'P4': '0', '미분류': '1'})
+        self.assertEqual(sum(map(int, tiles.values())), 3)  # 공식 오류 2 + 경고 1
+        md = h.markdown_report(self.r)
+        self.assertRegex(md, r'\| r2\.collection\.errors \| 정보 \|')
+        self.assertIn('자체 점검 실패 0건·경고 1건·미평가 1건·정보 1건', self.page)
+        self.assertIn('정보 1', h.a.result_summary_line(self.r) if hasattr(h, 'a') else a.result_summary_line(self.r))
+
+    def test_own_card_kept_when_no_official_card(self):
+        r = h.report(body_201(), 1, PREVIEW_MD)  # PREVIEW_MD에 THP 공식 오류·경고가 없으면 자체 카드가 따로 남는다
+        groups = a.card_groups(r['findings'])
+        officials = {f.get('source_check_id') for f, _ in groups if f.get('origin') != 'custom_rule'}
+        thp_card = [f for f, _ in groups if f.get('rule_id') == 'r2.thp.mode']
+        self.assertEqual(bool(thp_card), 'sys.mem.thp' not in officials)
+
+    def test_10_15_shape_counts(self):
+        line, checks, _ = Replay050Tests.CASES['1015']
+        r = h.report(body_201(), 1, replay_md(line, checks))
+        b = self.buttons(h.html_report(r))
+        s = r['official_summary']
+        self.assertEqual((b['error'], b['warning']), (s['errors'], s['warnings']))
+
+
 class Review052Tests(unittest.TestCase):
     """0.5.2 교차검증 확정 항목: 표시만 바뀌고 판정·숫자·카드 수는 0.5.1과 같아야 한다."""
 
@@ -925,16 +997,17 @@ class Review052Tests(unittest.TestCase):
     def test_judgment_counts_unchanged(self):
         r = self.r
         self.assertEqual(r['official_summary'], {'passed': 32, 'errors': 2, 'warnings': 1})
-        self.assertEqual(r['analysis_summary']['custom_rule_counts'], {'pass': 4, 'warning': 2, 'not_evaluated': 1})
+        # 0.5.3: 수집 오류 기록은 경고가 아니라 정보. 자체 경고는 THP 1건만.
+        self.assertEqual(r['analysis_summary']['custom_rule_counts'], {'pass': 4, 'warning': 1, 'info': 1, 'not_evaluated': 1})
         results = {c['rule_id']: c['rule_result'] for c in r['check_results'] if c['origin'] == 'custom_rule'}
         self.assertEqual(results, {'r2.drive.state': 'pass', 'r2.capacity.bounds': 'pass', 'r2.version.consistency': 'pass',
-                                   'r2.tls.validity': 'pass', 'r2.thp.mode': 'warning', 'r2.collection.errors': 'warning',
+                                   'r2.tls.validity': 'pass', 'r2.thp.mode': 'warning', 'r2.collection.errors': 'info',
                                    'r2.iommu.consistency': None})
         cards = card_texts(self.page)
-        self.assertEqual(len(cards), 6)
+        self.assertEqual(len(cards), 4)  # 공식 3장(THP·IOMMU 자체 결과 포함) + 수집 오류 정보 1장
         prio = Counter(re.search(r'data-priority="([^"]*)"', c).group(1) for c in cards)
-        self.assertEqual(prio, {'P2': 3, 'P3': 1, 'unclassified': 2})
-        for key, n in (('P2', 3), ('P3', 1), ('미분류', 2)):
+        self.assertEqual(prio, {'P2': 1, 'P3': 1, 'unclassified': 1, 'none': 1})
+        for key, n in (('P2', 1), ('P3', 1), ('미분류', 1)):
             self.assertIn('<div class="tile-k">%s</div><div class="tile-v">%d</div>' % (key, n), self.page)
 
     def test_iommu_reason_split_keeps_result(self):
@@ -999,7 +1072,7 @@ class Review052Tests(unittest.TestCase):
 
     # -- B1·B2·D7 -----------------------------------------------------------------
     def test_priority_basis_and_conclusion(self):
-        self.assertIn('산정 기준: 공식 검사는 이 도구에 등록된 검사별 고정값', self.page)
+        self.assertIn('산정 기준: 카드 1장을 1건으로 셉니다. 공식 검사는 이 도구에 등록된 검사별 고정값', self.page)
         conclusion = re.search(r'<p class="conclusion">(.*?)</p>', self.page).group(1)
         self.assertIn('확인이 필요합니다(오류·실패 먼저).', conclusion)
         self.assertIn('현재 서비스 상태를 확정하지 않습니다', conclusion)
@@ -1035,17 +1108,16 @@ class Review052Tests(unittest.TestCase):
         for card in card_texts(self.page):
             visible = re.sub(r'<[^>]+>', ' ', card)
             self.assertNotRegex(visible, r' \([a-z]+_[a-z0-9_]+\)')
-        self.assertIn('title="insufficient_data / explicit_flags_absent_in_cmdline"', self.page)
+        self.assertIn('title="assessable / recognized_error_fields_only"', self.page)
         dash = re.search(r'<section id="dashboard".*?</section>', self.page, flags=re.S).group(0)
         self.assertNotIn('(consistent_observations)', dash)
         self.assertIn('(consistent_observations)', self.md)  # 부록·Markdown은 코드 유지
 
     def test_custom_cards_show_observed_values(self):
         cards = card_texts(self.page)
-        custom = [c for c in cards if '자체 점검 판정' in c]
+        custom = [c for c in cards if '자체 점검 판정' in c or '자체 점검 보조 정보' in c]
         self.assertEqual(len(custom), 3)
         for c in custom:
-            self.assertNotIn('마스킹된 근거', c)
             self.assertIn('관측값(원본 gzip)', c)
         joined = ''.join(custom)
         self.assertIn('server-0001: enabled=always, defrag=madvise, max_ptes_none=511', joined)
@@ -1067,8 +1139,8 @@ class Review052Tests(unittest.TestCase):
         self.assertIn('| 자체 점검 규칙 | 결과 | 규칙 버전 |', self.md)
         self.assertRegex(self.md, r'\| r2\.tls\.validity \| 통과 \|')
         self.assertRegex(self.md, r'\| r2\.iommu\.consistency \| 미평가 \|')
-        self.assertIn('목록 전체 6', self.page)
-        self.assertIn('통과 0 (공식 통과 상세는 원본에 없음, 자체 통과는 부록 규칙표)', self.page)
+        self.assertIn('목록 전체 4', self.page)
+        self.assertIn('공식 통과 0 (공식 통과 상세는 원본에 없음, 자체 통과는 부록 규칙표)', self.page)
 
 
 if __name__ == '__main__':

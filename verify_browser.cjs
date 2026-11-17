@@ -22,6 +22,14 @@ const laidOutDetailsChildren = target => target.evaluate(() => {
   return { shown: shown.length, all: kids.length };
 });
 
+// 0.5.3: 같은 설정의 자체 점검(THP·IOMMU)은 열린 공식 카드에 합쳐지므로 카드 수는 그만큼 줄어든다(aistordoctor.card_groups와 같은 규칙).
+const OWN_OFFICIAL = { 'r2.thp.mode': 'sys.mem.thp', 'r2.iommu.consistency': 'sys.mem.iommu' };
+function cardFindings(findings) {
+  const open = new Set(findings.filter(f => f.origin !== 'custom_rule' && f.source_check_id && f.official_status !== 'passed').map(f => f.source_check_id));
+  return findings.filter(f => !(f.origin === 'custom_rule' && open.has(OWN_OFFICIAL[f.rule_id])));
+}
+const cardPriority = f => (f.origin === 'custom_rule' && f.rule_result === 'info' ? 'none' : f.priority);
+
 async function main() {
   const [htmlPath, outputDirectory, hostileHtmlPath] = process.argv.slice(2);
   if (!htmlPath || !outputDirectory || !hostileHtmlPath) {
@@ -29,6 +37,7 @@ async function main() {
   }
   assert((await fs.stat(outputDirectory)).isDirectory());
   const report = JSON.parse(await fs.readFile(path.join(path.dirname(htmlPath), 'aistor-diag-report.json'), 'utf8'));
+  const cards = cardFindings(report.findings);
   const browser = await launch();
   const externalRequests = [];
   const pageErrors = [];
@@ -46,15 +55,15 @@ async function main() {
       if (message.type() === 'error') consoleErrors.push(message.text());
     });
     await page.goto(pathToFileURL(htmlPath).href, { waitUntil: 'load' });
-    assert.equal(await page.locator('article').count(), report.findings.length);
+    assert.equal(await page.locator('article').count(), cards.length);
     assert((await page.locator('body').innerText()).includes(report.tool_version));
     for (const [select, field] of [['#s', 'official_status'], ['#p', 'priority'], ['#c', 'category']]) {
       const values = await page.locator(`${select} option`).evaluateAll(options => options.map(option => option.value));
       for (const value of values) {
         await page.locator(select).selectOption(value);
-        const expected = report.findings.filter(finding => {
+        const expected = cards.filter(finding => {
           const actualField = field === 'official_status' && finding.origin === 'custom_rule'
-            ? '해당 없음 / 자체 결과: ' + (finding.rule_result || '미평가') : finding[field];
+            ? '해당 없음 / 자체 결과: ' + (finding.rule_result || '미평가') : field === 'priority' ? cardPriority(finding) : finding[field];
           return !value || actualField === value;
         }).length;
         const actual = await page.locator('article:visible').count();
@@ -65,8 +74,8 @@ async function main() {
     }
     await page.locator('#q').fill('no-such-finding-7fbf28');
     assert.equal(await page.locator('article:visible').count(), 0);
-    if (report.findings.length) {
-      await page.locator('#q').fill(report.findings[0].title);
+    if (cards.length) {
+      await page.locator('#q').fill(cards[0].title);
       assert((await page.locator('article:visible').count()) > 0);
     }
     await page.locator('#q').fill('');
@@ -101,7 +110,7 @@ async function main() {
     await page.setViewportSize({ width: 1440, height: 1000 });
     await page.emulateMedia({ media: 'print' });
     assert.equal(await page.locator('.filters').isVisible(), false);
-    assert.equal(await page.locator('article:visible').count(), report.findings.length);
+    assert.equal(await page.locator('article:visible').count(), cards.length);
     // 0.5.0: 인쇄 시 접힌 근거·부록이 모두 펼쳐져야 한다.
     { const d = await laidOutDetailsChildren(page); assert.equal(d.shown, d.all); }
     await page.screenshot({ path: path.join(outputDirectory, 'print.png'), fullPage: true });
@@ -120,6 +129,9 @@ async function main() {
       severityCases.push({ sev, expected });
     }
     await page.locator('#filters button[data-sev=""]').click();
+    // 0.5.3: 공식 오류·경고 카드 수와 mc 요약 숫자(기록용, 상세 없는 공식 항목이 있으면 다를 수 있음).
+    const officialCards = { error: await page.locator('article[data-sev="error"]').count(), warning: await page.locator('article[data-sev="warning"]').count(),
+      summary: report.official_summary ? { errors: report.official_summary.errors, warnings: report.official_summary.warnings } : null };
     for (const scheme of ['light', 'dark']) {
       await page.emulateMedia({ colorScheme: scheme });
       await page.screenshot({ path: path.join(outputDirectory, `full-${scheme}.png`), fullPage: true });
@@ -129,7 +141,7 @@ async function main() {
     const noJs = await browser.newContext({ viewport: { width: 1440, height: 1000 }, javaScriptEnabled: false });
     const plain = await noJs.newPage();
     await plain.goto(pathToFileURL(htmlPath).href, { waitUntil: 'load' });
-    assert.equal(await plain.locator('article:visible').count(), report.findings.length);
+    assert.equal(await plain.locator('article:visible').count(), cards.length);
     assert.equal(await plain.locator('#filters').isVisible(), false);
     assert.equal(await plain.locator('#dashboard').isVisible(), true);
     await plain.screenshot({ path: path.join(outputDirectory, 'nojs.png'), fullPage: true });
@@ -144,7 +156,7 @@ async function main() {
     await fs.writeFile(barePath, bare);
     const plain2 = await noJs.newPage();
     await plain2.goto(pathToFileURL(barePath).href, { waitUntil: 'load' });
-    assert.equal(await plain2.locator('article:visible').count(), report.findings.length);
+    assert.equal(await plain2.locator('article:visible').count(), cards.length);
     const bareText = await plain2.locator('body').innerText();
     const s = report.official_summary || {};
     const keyNumbers = {};
@@ -166,7 +178,7 @@ async function main() {
     const result = {
       engine: KIND, browser: browser.version(), protocol: 'file:', printPdf, noCssNoJs: { articlesVisible: 'passed', keyNumbers }, toolVersion: report.tool_version,
       inputGeneration: path.basename(path.dirname(htmlPath)), filters: cases,
-      search: 'passed', severityButtons: severityCases, noJs: 'passed', printExpandsDetails: 'passed', keyboardDisclosure: hasDisclosure ? 'passed' : 'not_applicable', printLayout: 'passed',
+      search: 'passed', severityButtons: severityCases, officialCards, noJs: 'passed', printExpandsDetails: 'passed', keyboardDisclosure: hasDisclosure ? 'passed' : 'not_applicable', printLayout: 'passed',
       hostileMarkup: 'passed', desktop, mobile, externalRequests, pageErrors, consoleErrors,
       scope: 'Application-page requests only; not Chrome background services or every Markdown viewer.',
     };
