@@ -14,7 +14,7 @@ import zlib
 import aistordoctor as a
 import r2_enrichment as enrichment
 
-VERSION = '0.5.1-r2'
+VERSION = '0.5.2-r2'
 SCHEMA_VERSION = '1.3-r2'
 MAX_COMPRESSED = 32 * 1024 * 1024
 MAX_EXPANDED = 64 * 1024 * 1024
@@ -210,7 +210,7 @@ CATALOG = {
     'r2.drive.state': ('드라이브 관측 상태', '가용성', ['drives[].state'], 'ok/offline만 평가; 다른 상태는 판정 불가'),
     'r2.capacity.bounds': ('용량 카운터 범위', '용량', ['totalspace', 'usedspace', 'availspace'], '비음수 정수, used/available 각각 total 이하; 임계 점유율·추세는 미평가'),
     'r2.version.consistency': ('서버 버전 일치', '설정', ['servers[].version'], '관측된 서버 버전 문자열의 일치; 특정 버전을 요구하지 않음'),
-    'r2.tls.validity': ('인증서 수집 시점 유효기간', '보안', ['timestamp', 'not_before', 'not_after'], '원본 수집 시점에서 유효기간만 평가; 만료 임박 정책·신뢰체인·SAN은 미평가')}
+    'r2.tls.validity': ('인증서 수집 시점 유효기간', '보안', ['timestamp', 'not_before', 'not_after'], '원본 수집 시점에서 유효기간만 평가; 만료 임박 정책·신뢰체인·SAN은 미평가(공식 mc 보고서의 TLS 검사와는 별개 판정)')}
 
 
 def evaluate(n, as_of=None):
@@ -280,6 +280,10 @@ def conflict_lines(detail):
     return lines
 
 
+COLLECTION_ADVICE = ('이 항목은 설정 변경 대상이 아니라 수집 범위 표시입니다. 오류가 난 영역(예: CPU 주파수 정책, NIC ring)은 '
+                     '이 보고서에서 값이 수집되지 않았으며, 이 도구는 해당 값으로 판정하지 않습니다.')
+
+
 def report(body, documents=1, official_text=None, as_of=None, mask='strict'):
     n, notes = normalize(body)
     checks = evaluate(n, as_of) + enrichment.system_rules(n)
@@ -331,8 +335,11 @@ def report(body, documents=1, official_text=None, as_of=None, mask='strict'):
             continue
         r['findings'].append(dict(c, assessment_reason=c['reason'], priority='P2' if c['rule_result'] else 'unclassified',
             observed='자체 점검 결과: ' + a.result_text(c['rule_result']) + ' / ' + a.label(c['reason']), detail=c['condition'],
-            evidence_blocks=[], recommendation='원본 관측과 실제 대상을 읽기 전용으로 대조하십시오. 자동 조치는 수행하지 않습니다.',
-            impact='현재 서비스 상태·데이터 안전성·원인을 확정하지 않습니다.', approval_required=True if c['rule_result'] else None,
+            evidence_blocks=[], recommendation=COLLECTION_ADVICE if c['rule_id'] == 'r2.collection.errors' else
+            '원본 관측과 실제 대상을 읽기 전용으로 대조하십시오. 자동 조치는 수행하지 않습니다.',
+            impact='현재 서비스 상태·데이터 안전성·원인을 확정하지 않습니다.',
+            # 0.5.2(B2): 수집 오류는 설정 변경 대상이 아니므로 승인 불필요.
+            approval_required=(c['rule_id'] != 'r2.collection.errors') if c['rule_result'] else None,
             verification_steps=['필요한 입력과 의미를 확인한 뒤 동일 조건으로 재점검합니다.'], limitations=[c['condition']]))
     r['analysis_summary'] = {'custom_rule_counts': dict(Counter(c['rule_result'] or 'not_evaluated' for c in checks)),
                              'custom_rule_catalog': {c['rule_id']: {'version': c['rule_version'], 'required_inputs': c['required_inputs'], 'condition': c['condition']} for c in checks}}
@@ -350,7 +357,39 @@ def view(r):
         if f['origin'] == 'custom_rule':
             f['official_status'] = '해당 없음 / 자체 결과: ' + (f['rule_result'] or '미평가')
     v['facts']['custom_check_results'] = r['check_results']
+    n = v['facts'].get('health')
+    if isinstance(n, dict):
+        for f in v['findings']:
+            if f['origin'] == 'custom_rule':
+                f['observed_values'] = observed_values(f['rule_id'], n)  # 0.5.2(C3): 표시용(JSON에는 넣지 않음)
     return v
+
+
+def observed_values(rule_id, n):
+    """Per-server observations already in the report (allowlisted fields only), for a custom-rule card."""
+    configs = n.get('system_configurations') or []
+    who = lambda c: c.get('server_id') or c['id'] + ' (대상 미확인)'
+    if rule_id == 'r2.thp.mode':
+        return ['%s: enabled=%s, defrag=%s, max_ptes_none=%s' % (who(c), *(a.MISSING if c.get(k) is None else c[k] for k, _ in THP_COLUMNS))
+                for c in configs]
+    if rule_id == 'r2.iommu.consistency':
+        return ['%s: %s' % (who(c), ', '.join('%s=%s' % (k, v if v is not None else '모호') for k, v in sorted(c['iommu_flags'].items()))
+                            or ('명시 옵션 없음' if c.get('proc_cmdline_observed', True) else '부팅 옵션 기록 없음')) for c in configs]
+    if rule_id == 'r2.collection.errors':
+        return ['%s %s행(%s)' % (SECTION_LABELS.get(k, k), v['reported_errors'], ', '.join('%s %s' % kv for kv in (v.get('error_types') or {}).items()))
+                for k, v in n['collection']['sections'].items() if v.get('reported_errors')] or ['오류가 기록된 행 없음']
+    if rule_id in ('r2.drive.state', 'r2.capacity.bounds'):
+        states = Counter(d.get('state') or '미확인' for d in n['drives'])
+        out = ['드라이브 기록 %d개: %s' % (len(n['drives']), ', '.join('%s %d' % kv for kv in sorted(states.items())))]
+        bad = [d['id'] for d in n['drives'] if None not in (d['totalspace'], d['usedspace'], d['availspace'])
+               and (d['usedspace'] > d['totalspace'] or d['availspace'] > d['totalspace'])]
+        return out + (['범위를 벗어난 카운터: ' + ', '.join(bad)] if rule_id == 'r2.capacity.bounds' and bad else [])
+    if rule_id == 'r2.version.consistency':
+        return ['%s: %s' % (s['id'], s['version'] or a.MISSING) for s in n['servers']]
+    if rule_id == 'r2.tls.validity':
+        return ['%s: %s ~ %s' % (c['id'], a.with_kst(c['not_before']) or a.MISSING, a.with_kst(c['not_after']) or a.MISSING) for c in n['certificates']] or \
+            ['인증서 기록 없음(TLS 꺼짐 또는 미제공)']
+    return []
 
 
 SECTION_LABELS = {'cpus': 'CPU 정보', 'netinfo': '네트워크 정보', 'partitions': '파티션', 'osinfo': 'OS 정보',
@@ -366,6 +405,13 @@ def error_count_text(collection):
     return None
 
 
+def gib(value):
+    # 0.5.2(B6): 2^30 이상 정수에만 바이트로 볼 때의 GiB를 덧붙인다(원값·JSON은 그대로).
+    if type(value) is int and value >= 2 ** 30:
+        return '%d (바이트로 보면 %.1f GiB)' % (value, value / 2 ** 30)
+    return value
+
+
 def observation_blocks(r):
     """Presentation only: allowlisted observations as label/value tables, never new diagnoses."""
     n = r.get('facts', {}).get('health')
@@ -378,9 +424,16 @@ def observation_blocks(r):
               ('table', ['대상 별칭', '관측 버전', '원본 JSON 위치'],
                [(s['id'], s['version'], s['source_locator']['json_path']) for s in n['servers']]),
               ('h', 3, '드라이브 기록'),
-              ('p', '용량은 원본 카운터입니다. 단위·점유율·성능을 확정하지 않습니다.'),
+              ('p', '용량은 원본 카운터입니다. 단위는 검증하지 않았으며, 괄호의 GiB는 값을 바이트로 볼 때의 환산입니다. 점유율·성능은 판정하지 않습니다.'),
               ('table', ['드라이브 별칭', '서버 별칭', '관측 상태', 'totalspace', 'usedspace', 'availspace', '원본 JSON 위치'],
-               [(d['id'], d['server_id'], d['state'], d['totalspace'], d['usedspace'], d['availspace'], d['source_locator']['json_path']) for d in n['drives']])]
+               [(d['id'], d['server_id'], d['state'], gib(d['totalspace']), gib(d['usedspace']), gib(d['availspace']), d['source_locator']['json_path'])
+                for d in n['drives']])]
+    # 0.5.2(A3): 자체 점검 r2.tls.validity가 본 인증서(별칭·유효기간만, 주체·SAN은 내보내지 않음).
+    certs = n.get('certificates') or []
+    blocks.append(('h', 3, '인증서 기록(원본 gzip, 자체 점검 r2.tls.validity 입력)'))
+    blocks.append(('table', ['인증서 별칭', '유효 시작', '만료', '원본 JSON 위치'],
+                   [(c['id'], a.with_kst(c['not_before']), a.with_kst(c['not_after']), c['source_locator']['json_path']) for c in certs])
+                  if certs else ('p', '인증서 기록 없음(TLS 꺼짐 또는 미제공). r2.tls.validity는 미평가로 남습니다.'))
     configs = n.get('system_configurations') or []
     if configs:
         blocks += [('h', 3, '시스템 설정 관측(THP·IOMMU·rlimit)'),
@@ -409,7 +462,6 @@ def observation_blocks(r):
     blocks.append(('details', '수집 범위·미지원·결합 제한', [
         ('table', ['항목', '값'], [('수집 오류 집계 범위', '인식된 sys 배열의 error/errors 필드만 집계(부재가 전체 수집 성공을 증명하지 않음)'),
                                   ('입력 결합 상태', a.label(link.get('status'))),
-                                  ('같은 수집 실행 증명', '아니오'),
                                   ('토폴로지', 'pool·set 인덱스만 표시, quorum·장애 도메인 미추론')])]))
     return blocks
 
@@ -472,7 +524,9 @@ def drive_grid_html(n):
               '<span class="key u-lo"></span>70% 미만 <span class="key u-mid"></span>70~90% <span class="key u-hi"></span>90% 이상 '
               '(표시용 구간이며 판정 아님)</p>')
     return ('<section id="topology" aria-labelledby="topology-h"><h2 id="topology-h">서버 × 드라이브</h2>'
-            '<p class="note">서버 %d개 · 드라이브 %d개 기록 (ok %d · offline %d · 미확인 %d). 원본 카운터 기준 비율이며 단위·성능·물리 배치를 확정하지 않습니다.</p>%s'
+            '<p class="note">서버 %d개 · 드라이브 %d개 기록 (ok %d · offline %d · 미확인 %d). 원본 카운터 기준 비율이며 단위·성능·물리 배치를 확정하지 않습니다.</p>'
+            '<p class="note">참고: "server-0001" 등은 원본 gzip 수집 순서로 이 도구가 붙인 번호이고, "identifier-001" 등은 공식 mc 보고서 안의 식별자를 마스킹하며 '
+            '등장 순서로 붙인 번호입니다. 서버 수·대상이 일치하더라도 두 번호가 반드시 같은 서버를 가리키는 순서라고 보장하지 않습니다.</p>%s'
             '<div class="srvgrid">%s</div>%s</section>') % (
         len(n['servers']), len(n['drives']), states['ok'], states['offline'], states['unknown'], legend, ''.join(blocks), topo)
 
@@ -506,7 +560,7 @@ def config_table_html(n):
     common_iommu, common_rlimit = majority(iommu), majority(rlimits)
     head = ''.join('<th scope="col">%s</th>' % a.esc(x) for x in ('서버', 'THP enabled', 'THP defrag', 'max_ptes_none', '명시적 IOMMU 옵션', 'rlimit-max'))
     rec = enrichment.THP_OFFICIAL_RECOMMENDED
-    recommended = ('<tr class="rec"><th scope="row">권장값</th>%s<td>서버 간 동일<br><small>고정 권장값 없음</small></td><td>기준 없음<br><small>표시만</small></td></tr>' %
+    recommended = ('<tr class="rec"><th scope="row">권장값</th>%s<td>서버 간 동일<br><small>공식 sys.mem.iommu 기준: iommu=pt 또는 intel_iommu·amd_iommu=off (판정은 검사 결과 참고)</small></td><td>기준 없음<br><small>표시만</small></td></tr>' %
                    ''.join('<td>%s<br><small>공식 sys.mem.thp Resolution</small></td>' % a.esc(' 또는 '.join(str(v) for v in rec[key])) for key, _ in THP_COLUMNS))
     rows = []
     mismatches = 0
@@ -605,7 +659,7 @@ def health_dashboard(r, n):
         a.tile('info', '서버 기록', len(n['servers'])),
         a.tile('error' if states['offline'] else 'info', '드라이브 기록', len(n['drives']),
                'ok %d · offline %d · 미확인 %d' % (states['ok'], states['offline'], states['unknown'])),
-        a.tile('warning' if count else 'info', '수집 오류 행', count), a.esc(a.label(link)))
+        a.tile('warning' if count else 'info', '수집 오류 행', count), a.esc(a.plain(a.label(link))))
 
 
 def html_report(r):

@@ -18,7 +18,7 @@ import sys
 import time
 import uuid
 
-VERSION = '0.5.1-r1'
+VERSION = '0.5.2-r1'
 SCHEMA_VERSION = '1.1-r1'
 PARSER_VERSION = 'official-markdown-r1-2'
 POLICY_VERSION = 'r1-1'
@@ -221,7 +221,11 @@ LABEL_KO = {
     'thp_config_missing': 'THP 설정 기록 없음', 'observed_value_differs_from_official_recommendation': '관측값이 공식 권장값과 다름',
     'all_observed_values_match_official_recommendation': '관측값이 모두 공식 권장값과 같음',
     'thp_values_missing_or_ambiguous': 'THP 값 일부가 없거나 모호함', 'explicit_flags_only': '명시된 옵션만 비교',
-    'explicit_flags_unobserved_or_ambiguous': '명시적 IOMMU 옵션이 관측되지 않았거나 모호함',
+    'explicit_flags_unobserved_or_ambiguous': '부팅 옵션에서 iommu·intel_iommu·amd_iommu 값을 찾지 못했거나 서버 일부만 있거나 값이 충돌함(옵션 부재는 판정하지 않음)',
+    'explicit_flags_absent_in_cmdline': '부팅 옵션(proc-cmdline)은 수집됐으나 iommu·intel_iommu·amd_iommu 옵션이 없음',
+    'proc_cmdline_missing': '일부 또는 전체 서버에서 부팅 옵션 기록이 없음',
+    'certificate_expiry_not_available': '공식 Markdown에 인증서 만료 정보 없음(공식 TLS 검사가 통과하면 상세가 실리지 않음)',
+    'analysis_time_unavailable': '분석 기준 시각 없음',
     'recognized_error_fields_only': '인식된 오류 필드만 집계', 'lower_bound_error_rows_observed': '최소 오류 행 수만 확인',
     'error_coverage_unavailable': '오류 집계 범위를 확인할 수 없음',
 }
@@ -233,6 +237,14 @@ def label(code):
         return MISSING
     text = LABEL_KO.get(str(code)) or CODE_KO.get(str(code)) or RESULT_KO.get(str(code))
     return '%s (%s)' % (text, code) if text else str(code)
+
+
+# 0.5.2(C2): HTML 카드·요약에서는 괄호 속 내부 코드를 떼고 한국어만 보인다(부록 표·필터·Markdown·JSON은 그대로).
+CODE_SUFFIX = re.compile(r' \((?:[a-z][a-z0-9]*_[a-z0-9_]*|[a-z]+)\)')
+
+
+def plain(text):
+    return CODE_SUFFIX.sub('', str(text))
 
 
 def priority_text(priority):
@@ -300,11 +312,14 @@ def info_blocks(report):
                  ('원본 gzip JSON 문서 수', health.get('documents')),
                  ('원본 형식 버전(실행을 막지 않음)', health.get('format_version'))]
     basis_name = '--as-of 지정 시각' if meta.get('as_of_origin') == 'explicit' else '수집 시각'
-    rows += [('인증서 만료 시각', facts.get('certificate_expires_kst') or facts.get('certificate_expires_at')),
+    rows += [('인증서 만료 시각(공식 Markdown 기준)', facts.get('certificate_expires_kst') or facts.get('certificate_expires_at')),
              ('인증서 남은 시간(%s 기준)' % basis_name, duration_text(facts.get('certificate_remaining_seconds'))),
              ('인증서 남은 시간(보고서 생성 시각 기준)', render_time_remaining(facts.get('certificate_expires_at'))),
              ('인증서 시각 미확정 사유', facts.get('certificate_time_reason'))]
-    blocks.append(('table', ['항목', '값'], [r for r in rows if not (r[0] == '인증서 시각 미확정 사유' and r[1] is None)]))
+    # 0.5.2(A3·D6): 사유가 없으면 행을 빼고(label(None)이 '미제공'을 돌려주므로 먼저 거름), 있으면 한국어로 보인다.
+    rows = [(k, label(v) if k == '인증서 시각 미확정 사유' else v) for k, v in rows if not (k == '인증서 시각 미확정 사유' and v is None)]
+    rows.append(('스키마·해설 정책 버전', '%s / %s' % (report.get('schema_version'), (report.get('policy') or {}).get('version'))))
+    blocks.append(('table', ['항목', '값'], rows))
     link = report.get('input_link')
     if isinstance(link, dict):
         blocks += [('h', 2, '입력 결합 확인'),
@@ -324,8 +339,11 @@ def info_blocks(report):
     blocks.append(('table', ['구분', '값', '개수'], rows) if rows else ('p', '집계할 항목이 없습니다.'))
     catalog = summary.get('custom_rule_catalog')
     if isinstance(catalog, dict) and catalog:
-        blocks.append(('table', ['자체 점검 규칙', '규칙 버전', '필요 입력', '판정 조건'],
-                       [(rid, c.get('version'), ', '.join(c.get('required_inputs') or []), c.get('condition')) for rid, c in catalog.items()]))
+        # 0.5.2(D1): 통과한 자체 점검은 카드가 없으므로 결과 열로 어느 규칙인지 보인다.
+        results = {c.get('rule_id'): c.get('rule_result') for c in report.get('check_results') or [] if c.get('origin') == 'custom_rule'}
+        blocks.append(('table', ['자체 점검 규칙', '결과', '규칙 버전', '필요 입력', '판정 조건'],
+                       [(rid, result_text(results.get(rid)), c.get('version'), ', '.join(c.get('required_inputs') or []), c.get('condition'))
+                        for rid, c in catalog.items()]))
     blocks += [('h', 2, '입력 버전'),
                ('table', ['구성요소', '값', '사유'],
                 [(name, ', '.join(v['value']) if isinstance(v.get('value'), list) else v.get('value'), label(v.get('reason')))
@@ -754,9 +772,9 @@ def model(text, mask='strict', as_of=None, parsed=None):
     if as_of and basis is None:
         raise InputError('as-of must include timezone')
     explain = {
-        'minio.cluster.min': ('가용성', 'P3', '검사 기준과 운영 권고를 구분하십시오. 물리 호스트·Erasure Set·패리티 없이 장애 허용 수를 계산할 수 없습니다.'),
-        'sys.mem.iommu': ('설정', 'unclassified', '부팅 옵션의 검사 불일치이며 실제 I/O 장애를 확정하지 않습니다. 호스트·배포 방식과 영향을 확인하고 변경은 별도 승인하십시오.'),
-        'sys.mem.thp': ('설정', 'P2', '보고서에 관측된 설정만 사용합니다. defrag와 max_ptes_none의 실제 값은 미확인입니다. 변경 영향과 호스트 적용 상태를 확인하십시오.'),
+        'minio.cluster.min': ('가용성', 'P3', '공식 메시지의 권장 서버 수는 검사 기준이고, 조치 안내(Resolution)의 server pool당 노드 수는 운영 권고라 숫자가 다를 수 있습니다. 물리 호스트·Erasure Set·패리티 없이 장애 허용 수를 계산할 수 없습니다.'),
+        'sys.mem.iommu': ('설정', 'unclassified', '부팅 옵션의 검사 불일치이며 실제 I/O 장애를 확정하지 않습니다. 공식 조치 안내의 update-grub은 Debian·Ubuntu 계열 명령입니다. RHEL·Rocky 등 el 계열은 grubby 또는 grub2-mkconfig로 부팅 옵션을 바꾸며, 재부팅 후 /proc/cmdline 내용으로 적용을 확인합니다. 호스트·배포 방식과 영향을 확인하고 변경은 별도 승인하십시오.'),
+        'sys.mem.thp': ('설정', 'P2', '공식 근거 표는 서버마다 권장과 다른 항목 하나만 보여 줄 수 있으며 어느 항목이 표시될지는 수집마다 달라질 수 있습니다. 표에 없는 항목이 권장값과 같다는 뜻은 아닙니다. 원본 gzip을 함께 분석하면 ‘시스템 설정 비교’ 표에서 enabled·defrag·max_ptes_none 세 값을 서버별로 확인할 수 있습니다. 공식 조치 안내의 echo 명령은 재부팅 후 유지되지 않으므로 영구 적용 방법은 운영 표준에 따라 별도로 정하십시오. 변경 영향과 호스트 적용 상태를 확인하십시오.'),
         'minio.net.tls.valid': ('보안', 'P2', '상세 만료 원인을 확인하십시오. Secret 이름·TLS 종료 위치는 미확인입니다. 교체 후 실제 제공 인증서를 재검증하십시오.')}
     findings, identifiers = [], Counter()
     expiry = None
@@ -864,12 +882,14 @@ def markdown(report, extra_blocks=None):
                     md_text(f['observed']), '', md_text(f['recommendation']), '', md_text(f['impact']), '',
                     '변경 승인: ' + APPROVAL_KO[f['approval_required']], '',
                     '### 재확인 절차', '', *['- ' + md_inline(step) for step in f['verification_steps']], '',
-                    '### 원본 근거(마스킹)', ''])
+                    '### 관측값(원본 gzip)' if f.get('origin') == 'custom_rule' and not f['evidence_blocks'] else '### 원본 근거(마스킹)', ''])
         for block in f['evidence_blocks']:
             out.append('근거 구간: ' + md_inline(label(block['section'])) + ' / 줄 ' + str(block['source_locator']['line']))
             out.extend([''] + evidence_markdown(block))
             out.append('')
-        if not f['evidence_blocks']:
+        if not f['evidence_blocks'] and f.get('origin') == 'custom_rule':
+            out.extend([*['- ' + md_inline(v) for v in f.get('observed_values') or ['관측값 없음']], ''])
+        elif not f['evidence_blocks']:
             out.extend([md_text(f['detail']).replace('\n', '\n\n'), ''])
     out.append(blocks_markdown((extra_blocks or []) + info_blocks(report)))
     return '\n'.join(out)
@@ -913,6 +933,11 @@ def tile(sev, name, value, sub=''):
             '<div class="tile-v">%s</div>%s</div>') % (sev, icon, esc(name), esc(value), '<div class="tile-s">%s</div>' % esc(sub) if sub else '')
 
 
+# 0.5.2(B1): 우선순위 산정 기준 설명(규칙 자체는 그대로).
+PRIORITY_BASIS = ('<p class="note">산정 기준: 공식 검사는 이 도구에 등록된 검사별 고정값(등록되지 않은 검사는 미분류), '
+                  '자체 점검은 경고·실패이면 P2, 미평가이면 미분류. 같은 설정을 다룬 공식 검사와 자체 점검은 각각 1건으로 셉니다.</p>')
+
+
 def conclusion_text(report):
     """One cautious line. Never states that the service is healthy."""
     parts, issues = [], 0
@@ -925,7 +950,10 @@ def conclusion_text(report):
         parts.append('자체 점검 실패 %s건·경고 %s건·미평가 %s건' % (custom.get('fail', 0), custom.get('warning', 0), custom.get('not_evaluated', 0)))
         issues += sum(custom.get(k, 0) for k in ('fail', 'warning', 'not_evaluated'))
     head = ', '.join(parts) or '판정 자료 없음'
-    verdict = '이 있어 확인이 필요합니다.' if issues else '으로, 보고된 오류·경고는 없습니다.'
+    # 0.5.2(D7): 오류·실패가 있으면 그것부터 보라고 덧붙인다(집계는 그대로).
+    urgent = (summary.get('errors') if isinstance(summary, dict) and isinstance(summary.get('errors'), int) else 0) + \
+        (custom.get('fail', 0) if isinstance(custom, dict) else 0)
+    verdict = ('이 있어 확인이 필요합니다(오류·실패 먼저).' if urgent else '이 있어 확인이 필요합니다.') if issues else '으로, 보고된 오류·경고는 없습니다.'
     return head + verdict + ' 수집 시점의 기록을 분석한 결과이며 현재 서비스 상태를 확정하지 않습니다.'
 
 
@@ -950,10 +978,10 @@ def dashboard_html(report, extra=''):
                        ('warning', custom.get('warning', 0), '경고'), ('unknown', custom.get('not_evaluated', 0), '미평가')], '자체 점검 결과 비율')))
     open_findings = [f for f in findings if severity(f) != 'passed']
     priorities = Counter(f.get('priority') for f in open_findings)
-    blocks.append('<div class="panel"><h3>해설 우선순위 (통과 제외, 이 도구 기준·공식 심각도 아님)</h3><div class="tiles prio">%s</div></div>' % ''.join(
+    blocks.append('<div class="panel"><h3>해설 우선순위 (통과 제외, 이 도구 기준·공식 심각도 아님)</h3><div class="tiles prio">%s</div>%s</div>' % (''.join(
         '<div class="tile tone-p%s"><div class="tile-k">%s</div><div class="tile-v">%d</div></div>' % (
             key[-1] if key in PRIORITY_ORDER else 'u', esc(key if key in PRIORITY_ORDER else '미분류'), priorities.get(key, 0))
-        for key in ('P1', 'P2', 'P3', 'P4', 'unclassified')))
+        for key in ('P1', 'P2', 'P3', 'P4', 'unclassified')), PRIORITY_BASIS))
     return ('<section id="dashboard" aria-labelledby="dashboard-h"><h2 id="dashboard-h">요약</h2>'
             '<p class="conclusion"><span aria-hidden="true">ⓘ</span> %s</p><div class="panels">%s%s</div></section>') % (
         esc(conclusion_text(report)), ''.join(blocks), extra)
@@ -970,32 +998,42 @@ def evidence_html(blocks):
     return ''.join(out)
 
 
+STANDARD_IMPACT = frozenset(('실제 서비스 영향은 이 보고서만으로 확정하지 않습니다.', '현재 서비스 상태·데이터 안전성·원인을 확정하지 않습니다.'))
+
+
 def finding_card(f):
     sev = severity(f)
     custom = f.get('origin') == 'custom_rule'
     if custom:
         verdict = ('<div class="box own-verdict"><h4>%s 자체 점검 판정 <small>(이 도구, 공식 판정 아님)</small></h4><p>%s</p>'
                    '<p class="muted">판정 조건: %s</p></div>') % (
-            badge(sev, '자체 결과: ' + result_text(f.get('rule_result'))), esc(f['observed']), esc(f.get('detail') or ''))
+            badge(sev, '자체 결과: ' + result_text(f.get('rule_result'))), esc(plain(f['observed'])), esc(f.get('detail') or ''))
     else:
         verdict = '<div class="box official"><h4>%s 공식 판정 <small>(mc 보고서)</small></h4><p>%s</p></div>' % (
-            badge(sev, '공식: ' + status_text(f)), esc(f['observed']))
+            badge(sev, '공식: ' + plain(status_text(f))), esc(f['observed']))
     steps = ''.join('<li>%s</li>' % esc(step) for step in f['verification_steps'])
     resolution = [b for b in f['evidence_blocks'] if b.get('section') == 'resolution']
     other = [b for b in f['evidence_blocks'] if b.get('section') != 'resolution']
     evidence = ''
     if resolution:
         evidence += '<details open><summary>공식 조치 안내(Resolution, 마스킹)</summary>%s</details>' % evidence_html(resolution)
-    if other or not f['evidence_blocks']:
+    if custom and not f['evidence_blocks']:
+        # 0.5.2(C3): 자체 점검은 판정 조건을 근거처럼 다시 싣지 않고, 원본 gzip의 서버별 관측값을 보인다.
+        values = f.get('observed_values') or []
+        if values:
+            evidence += '<details><summary>관측값(원본 gzip)</summary><ul>%s</ul></details>' % ''.join('<li>%s</li>' % esc(v) for v in values)
+    elif other or not f['evidence_blocks']:
         evidence += '<details><summary>마스킹된 근거</summary>%s</details>' % (evidence_html(other) or '<pre>%s</pre>' % esc(f['detail']))
-    meta = '<span class="chip">우선순위 %s</span><span class="chip">영역 %s</span>' % (esc(priority_text(f['priority'])), esc(f['category']))
+    meta = '<span class="chip">우선순위 %s</span><span class="chip">영역 %s</span>' % (esc(plain(priority_text(f['priority']))), esc(f['category']))
+    # 0.5.2(C1): 카드마다 같은 표준 면책 문장은 생략하고 검사 결과 머리말에 한 번만 둔다(JSON·Markdown은 그대로).
+    impact = '' if f['impact'] in STANDARD_IMPACT else '<p>%s</p>' % esc(f['impact'])
     return ('<article class="card sev-%s" data-sev="%s" data-status="%s" data-priority="%s" data-category="%s">'
             '<header class="card-h">%s<h3>%s</h3><div class="chips">%s</div></header>%s'
-            '<div class="box ours"><h4>이 도구의 해설 <small>(공식 판정과 별개)</small></h4><p>%s</p><p>%s</p>'
-            '<p class="muted">평가 범위: %s / 변경 승인: %s</p></div>%s%s</article>') % (
+            '<div class="box ours"><h4>이 도구의 해설 <small>(공식 판정과 별개)</small></h4><p>%s</p>%s'
+            '<p class="muted">평가 범위: <span title="%s">%s</span> / 변경 승인: %s</p></div>%s%s</article>') % (
         sev, sev, esc(f['official_status']), esc(f['priority']), esc(f['category']),
-        badge(sev), esc(f['title']), meta, verdict, esc(f['recommendation']), esc(f['impact']),
-        esc(assessment_text(f)), esc(APPROVAL_KO[f['approval_required']]),
+        badge(sev), esc(f['title']), meta, verdict, esc(f['recommendation']), impact,
+        esc('%s / %s' % (f.get('assessment'), f.get('assessment_reason'))), esc(plain(assessment_text(f))), esc(APPROVAL_KO[f['approval_required']]),
         '<div class="box steps"><h4>조치·재확인 절차</h4><ol>%s</ol></div>' % steps if steps else '', evidence)
 
 
@@ -1074,11 +1112,13 @@ R1_CATEGORIES = ('가용성', '설정', '보안', '미분류')
 
 def filters_html(cards_sev, status_options=(), categories=R1_CATEGORIES):
     counts = Counter(cards_sev)
-    buttons = ['<button type="button" data-sev="" aria-pressed="true">전체 %d</button>' % len(cards_sev)]
+    buttons = ['<button type="button" data-sev="" aria-pressed="true">목록 전체 %d</button>' % len(cards_sev)]
     for sev in ('error', 'warning', 'passed', 'unknown'):
         if sev != 'unknown' or counts.get('unknown'):
             icon, word = SEVERITY_UI[sev]
-            buttons.append('<button type="button" data-sev="%s" aria-pressed="false"><span aria-hidden="true">%s</span> %s %d</button>' % (sev, icon, word, counts.get(sev, 0)))
+            # 0.5.2(D2): 통과 카드가 없으면 대시보드의 통과 수와 어긋나 보이지 않게 이유를 붙인다.
+            note = ' (공식 통과 상세는 원본에 없음, 자체 통과는 부록 규칙표)' if sev == 'passed' and not counts.get(sev) else ''
+            buttons.append('<button type="button" data-sev="%s" aria-pressed="false"><span aria-hidden="true">%s</span> %s %d%s</button>' % (sev, icon, word, counts.get(sev, 0), note))
     extra = ''.join('<option value="%s">%s</option>' % (esc(value), esc(text)) for value, text in status_options)
     return ('<div class="filters" id="filters" hidden><div class="sevbtns" role="group" aria-label="심각도">%s</div>'
             '<label>검색 <input id="q" type="search"></label>'
@@ -1093,7 +1133,7 @@ def html_page(report, *, sections=(), dashboard_extra='', status_options=(), cat
     findings = sorted(report['findings'], key=lambda f: (SEVERITY_ORDER[severity(f)], PRIORITY_ORDER.get(f.get('priority'), 9)))
     cards = ''.join(finding_card(f) for f in findings)
     checks = ('<section id="checks" aria-labelledby="checks-h"><h2 id="checks-h">검사 결과 (오류·경고 우선)</h2>'
-              '<p class="note">공식 판정과 이 도구의 자체 점검은 별개입니다. 통과 상세는 복원하지 않습니다. 현재 서비스 상태의 실시간 검증이 아닙니다.</p>'
+              '<p class="note">공식 판정과 이 도구의 자체 점검은 별개입니다. 통과 상세는 복원하지 않습니다. 모든 해설은 수집 시점 기록에 근거하며 현재 서비스 상태·실제 영향·원인을 확정하지 않습니다(카드마다 반복하지 않음).</p>'
               '%s%s</section>') % (filters_html([severity(f) for f in findings], status_options, categories),
                                    cards or '<p>표시할 검사 상세가 없습니다.</p>')
     appendix = ('<section id="appendix"><details class="appendix"><summary>부록: 확인된 정보·입력 결합·한계</summary>%s</details></section>'
@@ -1101,8 +1141,8 @@ def html_page(report, *, sections=(), dashboard_extra='', status_options=(), cat
     body = [('dashboard', '요약', dashboard_html(report, dashboard_extra))] + list(sections) + \
            [('checks', '검사 결과', checks)] + list(before_appendix) + [('appendix', '부록', appendix)]
     toc = ''.join('<li><a href="#%s">%s</a></li>' % (esc(sid), esc(title)) for sid, title, _ in body)
-    meta = '도구·스키마·정책: %s · 상태: %s' % (report['tool_version'] + ' / ' + report['schema_version'] + ' / ' + report['policy']['version'],
-                                          report['run_status'] + ' — ' + STATUS_KO.get(report['run_status'], ''))
+    # 0.5.2(C4): 머리줄은 도구 버전과 분석 상태만. 스키마·해설 정책 버전은 부록 '확인된 정보' 표에 둔다.
+    meta = '도구 %s · 분석 상태: %s' % (report['tool_version'], STATUS_KO.get(report['run_status'], report['run_status']))
     return ('<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
             '<meta name="color-scheme" content="light dark">'
             '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; style-src \'unsafe-inline\'; script-src \'unsafe-inline\'; base-uri \'none\'; form-action \'none\'">'

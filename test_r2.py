@@ -1,5 +1,6 @@
 """R2 real fixture and synthetic bounds/security tests. No source copies or cleanup."""
 import ast
+from collections import Counter
 import copy
 import gzip
 import json
@@ -182,7 +183,7 @@ class R2Tests(unittest.TestCase):
         body['sys']['config'][0]['config']['proc-cmdline'] = ['other=canary-secret']
         r = h.report(body)
         self.assertEqual(r['facts']['health']['system_configurations'][0]['iommu_flags'], {})
-        self.assertIsNone(next(c for c in r['check_results'] if c['rule_id'] == 'r2.iommu.consistency')['rule_result'])
+        self.assertIsNone(next(c for c in r['check_results'] if c.get('rule_id') == 'r2.iommu.consistency')['rule_result'])
         self.assertNotIn('canary-secret', json.dumps(r))
 
     def test_collection_errors_redacted(self):
@@ -503,7 +504,7 @@ class R2Tests(unittest.TestCase):
         md, rendered = h.markdown_report(r), h.html_report(r)
         for text in (md, rendered, iommu['observed']):
             self.assertNotIn('None', text)
-            self.assertIn('자체 점검 결과: 미평가 / 명시적 IOMMU 옵션이 관측되지 않았거나 모호함', text)
+            self.assertIn('자체 점검 결과: 미평가 / 부팅 옵션(proc-cmdline)은 수집됐으나 iommu·intel_iommu·amd_iommu 옵션이 없음', text)
         self.assertIn('공식 상태: 해당 없음 / 자체 결과: 미평가', md)
 
     def test_r2_markdown_has_no_entities_and_filters_keep_values(self):
@@ -888,6 +889,186 @@ class Replay050Tests(unittest.TestCase):
                 self.assertIn('공식 판정(mc 보고서) 통과 %d · 오류 %d · 경고 %d' % (p, e, w), page)
                 self.assertIn('통과 %d · 오류 %d · 경고 %d' % (p, e, w), (saved / 'aistor-diag-report.md').read_text(encoding='utf-8'))
                 self.assertNotIn('secret.internal', page)
+
+
+
+
+def body_201():
+    """201(11/16) 형태 합성: 3서버 모두 ok·같은 버전·유효 인증서, cmdline에 IOMMU 옵션 없음, THP always/madvise/511, CPU·NIC 수집 오류."""
+    body = preview_body()
+    for server in body['minio']['info']['servers']:
+        for drive in server['drives']:
+            drive.update(state='ok', totalspace=10737418240, usedspace=1073741824, availspace=9663676416)
+    thp = {'enabled': '[always] madvise never', 'defrag': 'always defer defer+madvise [madvise] never', 'max_ptes_none': '511'}
+    for config in body['sys']['config']:
+        config['config'] = {'proc-cmdline': ['BOOT_IMAGE=(hd0,gpt2)/vmlinuz', 'ro', 'crashkernel=auto', 'quiet'],
+                            'thp-config': dict(thp), 'rlimit-max': 1048576}
+    body['sys']['cpus'] = [{'error': 'open /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor: no such file or directory canary-cpu'}] * 3
+    body['sys']['netinfo'] = [{'error': 'Error getting ring parameters for canary-eth0: operation not supported'}] * 3
+    return body
+
+
+def card_texts(page):
+    return re.findall(r'<article class="card.*?</article>', page, flags=re.S)
+
+
+class Review052Tests(unittest.TestCase):
+    """0.5.2 교차검증 확정 항목: 표시만 바뀌고 판정·숫자·카드 수는 0.5.1과 같아야 한다."""
+
+    def setUp(self):
+        line, checks, _ = Replay050Tests.CASES['1116']
+        self.r = h.report(body_201(), 1, replay_md(line, checks))
+        self.page, self.md = h.html_report(self.r), h.markdown_report(self.r)
+        self.find = {f['id']: f for f in self.r['findings']}
+
+    # -- 판정 고정 -------------------------------------------------------------
+    def test_judgment_counts_unchanged(self):
+        r = self.r
+        self.assertEqual(r['official_summary'], {'passed': 32, 'errors': 2, 'warnings': 1})
+        self.assertEqual(r['analysis_summary']['custom_rule_counts'], {'pass': 4, 'warning': 2, 'not_evaluated': 1})
+        results = {c['rule_id']: c['rule_result'] for c in r['check_results'] if c['origin'] == 'custom_rule'}
+        self.assertEqual(results, {'r2.drive.state': 'pass', 'r2.capacity.bounds': 'pass', 'r2.version.consistency': 'pass',
+                                   'r2.tls.validity': 'pass', 'r2.thp.mode': 'warning', 'r2.collection.errors': 'warning',
+                                   'r2.iommu.consistency': None})
+        cards = card_texts(self.page)
+        self.assertEqual(len(cards), 6)
+        prio = Counter(re.search(r'data-priority="([^"]*)"', c).group(1) for c in cards)
+        self.assertEqual(prio, {'P2': 3, 'P3': 1, 'unclassified': 2})
+        for key, n in (('P2', 3), ('P3', 1), ('미분류', 2)):
+            self.assertIn('<div class="tile-k">%s</div><div class="tile-v">%d</div>' % (key, n), self.page)
+
+    def test_iommu_reason_split_keeps_result(self):
+        iommu = self.find['r2.iommu.consistency']
+        self.assertIsNone(iommu['rule_result'])
+        self.assertEqual(iommu['assessment'], 'insufficient_data')
+        self.assertEqual(iommu['assessment_reason'], 'explicit_flags_absent_in_cmdline')
+        self.assertEqual(iommu['priority'], 'unclassified')
+        self.assertIn('부팅 옵션(proc-cmdline)은 수집됐으나 iommu·intel_iommu·amd_iommu 옵션이 없음', self.page)
+        self.assertIn('옵션이 없으면 미평가로 두며', self.r['analysis_summary']['custom_rule_catalog']['r2.iommu.consistency']['condition'])
+
+    def test_iommu_reason_variants(self):
+        def run(cmdlines):
+            body = body_201()
+            for config, cmd in zip(body['sys']['config'], cmdlines):
+                if cmd is None:
+                    config['config'].pop('proc-cmdline')
+                else:
+                    config['config']['proc-cmdline'] = cmd
+            r = h.report(body, 1, PREVIEW_MD)
+            f = next((f for f in r['findings'] if f['id'] == 'r2.iommu.consistency'), None)
+            res = next(c['rule_result'] for c in r['check_results'] if c.get('rule_id') == 'r2.iommu.consistency')
+            return res, f and f['assessment_reason']
+        self.assertEqual(run([['ro'], None, ['ro']]), (None, 'proc_cmdline_missing'))
+        self.assertEqual(run([['intel_iommu=on'], ['ro'], ['ro']]), (None, 'explicit_flags_unobserved_or_ambiguous'))
+        self.assertEqual(run([['iommu=pt']] * 3), ('pass', None))  # 통과는 카드 없음
+        self.assertEqual(run([['iommu=pt'], ['iommu=pt'], ['iommu=on']]), ('warning', 'explicit_flags_only'))
+        for code in ('proc_cmdline_missing', 'explicit_flags_absent_in_cmdline', 'explicit_flags_unobserved_or_ambiguous'):
+            self.assertNotEqual(a.label(code), code + ' (%s)' % code)
+
+    # -- 문구(A1·A2·D4·B3·B4) -----------------------------------------------------
+    def test_official_explanations(self):
+        thp, cluster, iommu = (self.find_official(cid)['recommendation'] for cid in ('sys.mem.thp', 'minio.cluster.min', 'sys.mem.iommu'))
+        self.assertIn('어느 항목이 표시될지는 수집마다 달라질 수 있습니다', thp)
+        self.assertIn('echo 명령은 재부팅 후 유지되지 않으므로', thp)
+        self.assertIn('server pool당 노드 수는 운영 권고', cluster)
+        self.assertIn('grubby 또는 grub2-mkconfig', iommu)
+        self.assertIn('재부팅 후 /proc/cmdline 내용으로', iommu)  # 경로 뒤 조사가 붙으면 마스킹됨
+
+    def find_official(self, cid):
+        return next(f for f in self.r['findings'] if f.get('source_check_id') == cid or f['id'] == cid or cid in str(f.get('check_id')))
+
+    # -- 인증서(A3·D6) ------------------------------------------------------------
+    def test_certificate_display(self):
+        for text in (self.page, self.md):
+            self.assertIn('인증서 기록(원본 gzip, 자체 점검 r2.tls.validity 입력)', text)
+            self.assertIn('certificate-0001', text)
+            self.assertIn('인증서 만료 시각(공식 Markdown 기준)', text)
+            self.assertIn('공식 mc 보고서의 TLS 검사와는 별개 판정', text)
+            self.assertNotIn('canary-subject', text)
+        body = body_201()
+        body['minio']['info']['tls'] = {'tls_enabled': False}
+        r = h.report(body, 1, PREVIEW_MD)
+        self.assertIn('인증서 기록 없음(TLS 꺼짐 또는 미제공). r2.tls.validity는 미평가로 남습니다.', h.html_report(r))
+
+    def test_certificate_reason_row_korean_or_absent(self):
+        rows = dict(row for block in a.info_blocks(self.r) if block[0] == 'table' for row in block[2] if len(row) == 2)
+        reason = rows.get('인증서 시각 미확정 사유')
+        if reason is not None:
+            self.assertNotRegex(reason, r'^[a-z_]+$')
+            self.assertNotEqual(reason, a.MISSING)
+
+    # -- B1·B2·D7 -----------------------------------------------------------------
+    def test_priority_basis_and_conclusion(self):
+        self.assertIn('산정 기준: 공식 검사는 이 도구에 등록된 검사별 고정값', self.page)
+        conclusion = re.search(r'<p class="conclusion">(.*?)</p>', self.page).group(1)
+        self.assertIn('확인이 필요합니다(오류·실패 먼저).', conclusion)
+        self.assertIn('현재 서비스 상태를 확정하지 않습니다', conclusion)
+
+    def test_collection_errors_not_change_approval(self):
+        f = self.find['r2.collection.errors']
+        self.assertIs(f['approval_required'], False)
+        self.assertIn('설정 변경 대상이 아니라 수집 범위 표시', f['recommendation'])
+        self.assertIs(self.find['r2.thp.mode']['approval_required'], True)
+        self.assertIsNone(self.find['r2.iommu.consistency']['approval_required'])
+        card = next(c for c in card_texts(self.page) if '설정 변경 대상이 아니라' in c)
+        self.assertIn('변경 승인: 불필요', card)
+
+    # -- B5·B6·D3 -----------------------------------------------------------------
+    def test_alias_note_gib_and_iommu_recommendation(self):
+        self.assertIn('두 번호가 반드시 같은 서버를 가리키는 순서라고 보장하지 않습니다', self.page)
+        for text in (self.page, self.md):
+            self.assertIn('10737418240 (바이트로 보면 10.0 GiB)', text)
+            self.assertIn('괄호의 GiB는 값을 바이트로 볼 때의 환산', text)
+        self.assertEqual(self.r['facts']['health']['drives'][0]['totalspace'], 10737418240)
+        self.assertIn('공식 sys.mem.iommu 기준: iommu=pt 또는 intel_iommu·amd_iommu=off', self.page)
+
+    # -- C1~C4 --------------------------------------------------------------------
+    def test_standard_disclaimer_once(self):
+        body = html_body(self.page)
+        for sentence in a.STANDARD_IMPACT:
+            self.assertNotIn(sentence, body)
+        self.assertEqual(body.count('카드마다 반복하지 않음'), 1)
+        self.assertIn('실제 서비스 영향은 이 보고서만으로 확정하지 않습니다.', self.md)  # Markdown은 그대로
+        self.assertEqual(self.md.count('같은 수집 실행 증명 |'), 1)
+
+    def test_cards_hide_internal_codes(self):
+        for card in card_texts(self.page):
+            visible = re.sub(r'<[^>]+>', ' ', card)
+            self.assertNotRegex(visible, r' \([a-z]+_[a-z0-9_]+\)')
+        self.assertIn('title="insufficient_data / explicit_flags_absent_in_cmdline"', self.page)
+        dash = re.search(r'<section id="dashboard".*?</section>', self.page, flags=re.S).group(0)
+        self.assertNotIn('(consistent_observations)', dash)
+        self.assertIn('(consistent_observations)', self.md)  # 부록·Markdown은 코드 유지
+
+    def test_custom_cards_show_observed_values(self):
+        cards = card_texts(self.page)
+        custom = [c for c in cards if '자체 점검 판정' in c]
+        self.assertEqual(len(custom), 3)
+        for c in custom:
+            self.assertNotIn('마스킹된 근거', c)
+            self.assertIn('관측값(원본 gzip)', c)
+        joined = ''.join(custom)
+        self.assertIn('server-0001: enabled=always, defrag=madvise, max_ptes_none=511', joined)
+        self.assertIn('server-0003: 명시 옵션 없음', joined)
+        self.assertIn('CPU 정보 3행(', joined)
+        self.assertIn('네트워크 정보 3행(', joined)
+        self.assertNotIn('canary', joined)
+        self.assertIn('### 관측값(원본 gzip)', self.md)
+        self.assertNotIn('observed_values', json.dumps(self.r, ensure_ascii=False))  # JSON에는 넣지 않음
+
+    def test_header_meta_and_appendix_versions(self):
+        self.assertIn('도구 %s · 분석 상태: 부분 분석' % h.VERSION, self.page)
+        self.assertNotIn('도구·스키마·정책', self.page)
+        self.assertIn('스키마·해설 정책 버전', self.page)
+        self.assertIn(h.SCHEMA_VERSION, self.page)
+
+    # -- D1·D2 --------------------------------------------------------------------
+    def test_rule_table_result_and_filter_text(self):
+        self.assertIn('| 자체 점검 규칙 | 결과 | 규칙 버전 |', self.md)
+        self.assertRegex(self.md, r'\| r2\.tls\.validity \| 통과 \|')
+        self.assertRegex(self.md, r'\| r2\.iommu\.consistency \| 미평가 \|')
+        self.assertIn('목록 전체 6', self.page)
+        self.assertIn('통과 0 (공식 통과 상세는 원본에 없음, 자체 통과는 부록 규칙표)', self.page)
 
 
 if __name__ == '__main__':

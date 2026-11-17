@@ -84,7 +84,7 @@ def extract(body, normalized, number):
             configurations.append({'id': 'config-%04d' % (index + 1), 'server_id': targets.get(endpoint(row.get('addr'))),
                 'thp_enabled': active_thp(thp.get('enabled')), 'thp_defrag': active_thp(thp.get('defrag')),
                 'thp_max_ptes_none': number(int(thp['max_ptes_none'])) if isinstance(thp.get('max_ptes_none'), str) and re.fullmatch(r'[0-9]{1,16}', thp['max_ptes_none']) else None,
-                'rlimit_max': number(config.get('rlimit-max')), 'iommu_flags': iommu,
+                'rlimit_max': number(config.get('rlimit-max')), 'iommu_flags': iommu, 'proc_cmdline_observed': isinstance(cmd, list),
                 'source_locator': {'input': 'health-001', 'json_path': '$.sys.config[%d].config' % index},
                 'target_scope': 'reported endpoint; physical-host identity not established'})
     coverage = {}
@@ -197,8 +197,17 @@ def system_rules(n):
     result = None
     if flags and all(x and all(v is not None for v in x.values()) for x in flags):
         result = 'pass' if len({tuple(sorted(x.items())) for x in flags}) == 1 else 'warning'
-    add('r2.iommu.consistency', '명시적 IOMMU 부팅 옵션 일치', result, 'explicit_flags_only' if result else 'explicit_flags_unobserved_or_ambiguous', ['sys.config.proc-cmdline'],
-        '명시된 옵션만 비교. 옵션 부재를 off로 해석하지 않으며 하드웨어 지원·I/O 장애는 판정하지 않음', '$.sys.config')
+    if result:
+        reason = 'explicit_flags_only'
+    elif not configurations or not all(c.get('proc_cmdline_observed') for c in configurations):
+        reason = 'proc_cmdline_missing'
+    elif not any(flags):
+        reason = 'explicit_flags_absent_in_cmdline'
+    else:
+        reason = 'explicit_flags_unobserved_or_ambiguous'  # 일부 서버만 명시·값 충돌
+    add('r2.iommu.consistency', '명시적 IOMMU 부팅 옵션 일치', result, reason, ['sys.config.proc-cmdline'],
+        '모든 서버에 iommu·intel_iommu·amd_iommu 옵션이 명시된 경우에만 서버 간 일치를 비교. 부팅 옵션 기록이 있어도 옵션이 없으면 미평가로 두며 '
+        '부재를 off로 해석하지 않음. 공식 sys.mem.iommu 검사의 오류 판정과 별개이며 하드웨어 지원·I/O 장애는 판정하지 않음', '$.sys.config')
     collection = n['collection']
     count, observed = collection['reported_error_count'], collection.get('observed_error_rows')
     if count:
