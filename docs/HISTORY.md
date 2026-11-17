@@ -191,3 +191,10 @@ UBI·Alma·Rocky·Oracle·CentOS Stream 컨테이너 16종, 보안 제약 변형
 검증팀(Arbiter·Atlas·Vector) 교차검증 문서 §4의 확정 항목(A1~A4, B2~B6, C1~C4, D1~D4·D7, 부록 중복 행)만 반영했습니다.
 판정·숫자·종료 코드·120초 결합 허용치·자원 제한·마스킹은 0.5.1과 같습니다. 보류 항목(B1 규칙 조정, THP·IOMMU 이중 집계, 자체 통과 카드)은 넣지 않았습니다.
 상세는 [IMPROVEMENT_PLAN.md](IMPROVEMENT_PLAN.md)의 "0.5.2".
+
+### 2026-11-17 0.5.3 검사 결과 목록 숫자를 mc 공식 요약과 일치
+
+mc 콘솔은 "32 passed, 2 errors, 1 warning"인데 HTML 목록 필터가 "오류 2 · 경고 3"으로 보여 혼동되던 문제를 고쳤습니다.
+목록의 공식 버튼은 mc 공식 결과만 세고, 자체 점검은 따로 셉니다. THP·IOMMU 자체 결과는 같은 설정의 공식 카드 안 보조 정보로 합쳤고,
+'제공된 수집 오류 기록'은 정보(ⓘ) 등급으로 내려 경고·P2에서 뺐습니다. 공식 판정·숫자·종료 코드는 그대로입니다.
+상세는 [IMPROVEMENT_PLAN.md](IMPROVEMENT_PLAN.md)의 "0.5.3".
