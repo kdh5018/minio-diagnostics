@@ -23,7 +23,7 @@ set -euo pipefail
 umask 022
 
 readonly PACKAGE_NAME=aistor-diag-analyzer
-readonly PACKAGE_VERSION=0.5.4
+readonly PACKAGE_VERSION=0.5.5
 readonly PBS_RELEASE=20261110
 readonly PBS_PYTHON=3.12.16
 readonly APP_FILES=(analyze.py aistordoctor.py r2_health.py r2_enrichment.py)
@@ -538,7 +538,7 @@ Python 런타임이 동봉되어 있습니다. 인터넷·SUBNET·MinIO 서버�
 
 5. 해석 시 주의
 ---------------
-- 공식 판정과 이 도구의 자체 점검은 별개이며 공식 판정이 우선합니다. 미평가·미제공·수집 오류는 정상이 아닙니다.
+- 보고서의 판정·숫자는 mc 공식 판정만 씁니다. 원본 gzip 관측값은 판정 없이 근거로만 보입니다. 미제공·수집되지 않은 항목은 정상이 아닙니다.
 - 인증서 남은 시간은 "수집 시각 기준"과 "보고서 생성 시각 기준"으로 표시합니다. 특정 시각은 --as-of로 봅니다.
 - 서버 주소·IP·호스트명은 identifier-NNN으로 가립니다(표준 커널 경로·공개 문서 주소는 그대로).
   마스킹을 적용해도 외부 공유 전에는 직접 검토하십시오.

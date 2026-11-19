@@ -2,13 +2,13 @@
 
 MinIO AIStor 진단 Markdown(mc 보고서)과 원본 diagnostics gzip을 읽어 HTML·Markdown·JSON 보고서를 만드는 오프라인 분석기입니다.
 서버 접속·인터넷·설치 없이 동작하며, 배포본(`el8-x86_64`: RHEL·Rocky·AlmaLinux 8/9/10)은 Python 런타임을 동봉합니다.
-공식 판정과 이 도구의 자체 점검은 별개이며, 종료 코드 0은 시스템이 정상이라는 뜻이 아닙니다.
+공식 판정(mc 보고서)만 판정·숫자로 표시하며, 원본 gzip 값은 판정 없이 근거로만 보입니다. 종료 코드 0은 시스템이 정상이라는 뜻이 아닙니다.
 
 ## 빠른 시작
 
 ```bash
-sha256sum -c aistor-diag-analyzer-0.5.4-el8-x86_64.tar.gz.sha256
-tar -xzf aistor-diag-analyzer-0.5.4-el8-x86_64.tar.gz && cd aistor-diag-analyzer-0.5.4-el8-x86_64
+sha256sum -c aistor-diag-analyzer-0.5.5-el8-x86_64.tar.gz.sha256
+tar -xzf aistor-diag-analyzer-0.5.5-el8-x86_64.tar.gz && cd aistor-diag-analyzer-0.5.5-el8-x86_64
 ./run-report.sh --check --verify-bundle                                   # 사전 점검
 ./run-report.sh --official-report /경로/diag-report-....md \
                 --health /경로/diag-data-....json.gz --allow-partial     # 실행(--health 생략 시 공식 Markdown 단독)
