@@ -15,6 +15,8 @@
 set -u
 set -o pipefail
 umask 077
+# 0.5.6: 동적 로더 주입 변수는 런타임(동봉·시스템 모두)에 넘기지 않는다.
+unset LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT
 
 readonly EXIT_USAGE=2
 readonly EXIT_OUTPUT=3
@@ -368,6 +370,32 @@ check_platform() {
 }
 
 PY=
+# 0.5.6: PATH에서 찾은 python3를 쓰기 전에, 다른 사용자가 바꿔 놓을 수 있는 위치인지 확인한다.
+# 실행 파일과 그 디렉터리(심볼릭 링크는 실제 위치까지)가 root 또는 현재 사용자 소유이고
+# 그룹·기타 쓰기 권한이 없어야 한다. stat을 쓸 수 없으면 거부한다.
+trusted_path_entry() {
+    local path=$1 info owner mode
+    info=$(stat -L -c '%u %a' -- "$path" 2>/dev/null) || return 1
+    owner=${info%% *}
+    mode=${info##* }
+    if [ "$owner" != 0 ] && [ "$owner" != "$(id -u)" ]; then
+        return 1
+    fi
+    case $mode in
+        *[2367]?|*[2367]) return 1 ;;
+    esac
+    return 0
+}
+trusted_python() {
+    local candidate=$1 real
+    real=$(readlink -f -- "$candidate" 2>/dev/null) || return 1
+    [ -n "$real" ] || return 1
+    trusted_path_entry "$candidate" || return 1
+    trusted_path_entry "$(dirname -- "$candidate")" || return 1
+    trusted_path_entry "$real" || return 1
+    trusted_path_entry "$(dirname -- "$real")" || return 1
+    return 0
+}
 select_runtime() {
     local selftest='import sys, argparse, fcntl, gzip, hashlib, ipaddress, json, uuid, zlib
 print("%d.%d.%d" % sys.version_info[:3])'
@@ -398,6 +426,9 @@ print("%d.%d.%d" % sys.version_info[:3])'
         fi
         die "$EXIT_ENV" "오류: 소스 실행에는 python3 $SYSTEM_PYTHON_MIN 이상이 필요합니다." \
             "Python이 없는 서버에서는 런타임 포함 배포물을 사용하십시오. 자동 설치는 하지 않습니다."
+    fi
+    if ! trusted_python "$candidate"; then
+        die "$EXIT_ENV" "오류: 시스템 python3($candidate) 또는 그 디렉터리를 다른 사용자가 바꿀 수 있어 사용하지 않습니다."             "root 또는 본인 소유이고 그룹·기타 쓰기 권한이 없는 위치의 python3만 사용합니다. 동봉 런타임 사용을 권장합니다."
     fi
     if ! ver=$("$candidate" -E -s -B -c "$selftest" 2>/dev/null); then
         die "$EXIT_ENV" "오류: 시스템 python3($candidate)에 필요한 표준 모듈이 없거나 실행에 실패했습니다." \

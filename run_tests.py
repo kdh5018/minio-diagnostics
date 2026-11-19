@@ -724,5 +724,130 @@ class Fix043Tests(unittest.TestCase):
         self.assertEqual(a.parse_report(SYNTHETIC)[2][0]['detail'], checks[0]['detail'].rstrip('\n'))
 
 
+# 0.5.6: 0.5.4 보안 점검에서 새던 형태를 합성 값으로 재현한다. 모두 가짜 값이다.
+CANARIES_056 = {
+    'json_accesskey': ('"accessKey": "AKCANARY0001xyz"', 'AKCANARY0001xyz'),
+    'json_secret_key': ('"secret_key":"skCanary0002Value"', 'skCanary0002Value'),
+    'root_user': ('MINIO_ROOT_USER=canaryadmin03', 'canaryadmin03'),
+    'root_password': ('MINIO_ROOT_PASSWORD=canaryPw0004', 'canaryPw0004'),
+    'co_kr_host': ('connect node1.canary-five.co.kr failed', 'canary-five'),
+    'io_host': ('endpoint api.canarysix.io down', 'canarysix'),
+    'short_host': ('server canaryseven is offline', 'canaryseven'),
+    'jwt': ('license eyJhbGciOiJFUzM4NCJ9.eyJzdWIiOiJjYW5hcnk4In0.c2lnbmF0dXJlOA', 'eyJzdWIiOiJjYW5hcnk4In0'),
+    'cert_cn': ('subject=CN=canarynine.corp', 'canarynine'),
+    'cert_san': ('X509v3 SAN: DNS:canaryten.internal.kr', 'canaryten'),
+    'api_key': ('api_key=canaryEleven11', 'canaryEleven11'),
+    'amz_credential': ('X-Amz-Credential=CANARY12AKID/20261119/us-east-1/s3/aws4_request', 'CANARY12AKID'),
+    'subnet_api_key': ('SUBNET_API_KEY canary13subnetkey', 'canary13subnetkey'),
+    'email': ('contact canary14@customer.kr', 'canary14'),
+    'mac': ('eth0 ether 02:42:ac:11:00:0f', '02:42:ac:11:00:0f'),
+    'uuid': ('deploymentID 7c3e9f10-1b2a-4c5d-8e6f-0a1b2c3d4e5f', '7c3e9f10-1b2a-4c5d-8e6f-0a1b2c3d4e5f'),
+    'ipv4': ('peer 10.20.30.41 timeout', '10.20.30.41'),
+    'ipv6': ('peer fd00:abcd::17 timeout', 'fd00:abcd::17'),
+    'url': ('see https://canary19.customer.kr/console', 'canary19'),
+    'bearer': ('Authorization: Bearer canary20bearertoken', 'canary20bearertoken'),
+}
+PEM_056 = '-----BEGIN CERTIFICATE-----\nMIIBszCCAVmgAwIBAgIUCanaryPem056\n-----END CERTIFICATE-----'
+
+
+def report_with_detail(detail):
+    return SYNTHETIC.replace('host=test.svc.cluster.local:9000 password=canary-secret', detail)
+
+
+class Fix056Tests(unittest.TestCase):
+    """0.5.6: 마스킹 누락·ReDoS·PEM 입력·www 자동 링크."""
+
+    def bodies(self, text, level='strict'):
+        r = a.model(text, level)
+        return {'json': json.dumps(r, ensure_ascii=False), 'md': a.markdown(r), 'html': a.html_report(r)}
+
+    def test_detail_reaches_every_renderer(self):
+        # 이 전제가 깨지면 아래 누락 테스트가 아무것도 증명하지 못한다.
+        for name, body in self.bodies(report_with_detail('marker-visible-zz')).items():
+            self.assertIn('marker-visible-zz', body, name)
+
+    def test_canaries_masked_in_all_formats_and_levels(self):
+        for level in ('strict', 'basic'):
+            for name, (line, needle) in CANARIES_056.items():
+                if level == 'basic' and name == 'short_host':
+                    continue  # 포트 없는 짧은 이름은 strict 전용
+                with self.subTest(level=level, canary=name):
+                    for fmt, body in self.bodies(report_with_detail(line), level).items():
+                        self.assertNotIn(needle, body, fmt)
+
+    def test_canaries_masked_when_combined_on_one_line(self):
+        line = ' | '.join(v[0] for v in CANARIES_056.values())
+        for fmt, body in self.bodies(report_with_detail(line)).items():
+            for name, (_, needle) in CANARIES_056.items():
+                self.assertNotIn(needle, body, (fmt, name))
+
+    def test_pem_block_masked_and_report_produced(self):
+        for level in ('strict', 'basic'):
+            r = a.model(report_with_detail('cert follows\n' + PEM_056 + '\ntail-visible'), level)
+            for body in (json.dumps(r), a.markdown(r), a.html_report(r)):
+                self.assertNotIn('CanaryPem056', body)
+                self.assertNotIn('BEGIN CERTIFICATE', body)
+                self.assertIn('tail-visible', body)
+        unclosed = a.model(report_with_detail('-----BEGIN CERTIFICATE-----\nMIIBCanaryOpen056'))
+        self.assertNotIn('CanaryOpen056', json.dumps(unclosed))
+        key = a.model(report_with_detail('-----BEGIN PRIVATE KEY-----\nMIIECanaryKey056\n-----END PRIVATE KEY-----'))
+        self.assertNotIn('CanaryKey056', json.dumps(key))
+
+    def test_masking_is_linear_on_long_lines(self):
+        # 0.5.4에서는 64KB 한 줄에 100초 이상 걸렸다.
+        for unit in ('a.', 'a-', 'a.:', 'a@', 'eyJ.', 'a:', '/a', '1.', 'aB3+', 'server ', '"accessKey":'):
+            text = unit * (65536 // len(unit))
+            m = a.Masker('strict')
+            started = a.time.monotonic()
+            m.string(text)
+            m.string(text + '.')
+            self.assertLess(a.time.monotonic() - started, 3.0, unit)
+        started = a.time.monotonic()
+        a.model(report_with_detail('a.' * 32000))
+        self.assertLess(a.time.monotonic() - started, 3.0)
+
+    def test_deadline_enforced_during_masking(self):
+        m = a.Masker('strict', deadline=a.time.monotonic() - 1)
+        with self.assertRaises(a.InputError):
+            m.string('plain')
+        m = a.Masker('strict', deadline=a.time.monotonic() - 1)
+        with self.assertRaises(a.InputError):
+            for _ in range(1024):
+                m.tick()
+        # model(): 파싱이 끝난 뒤 시간이 지나면 마스킹 단계에서 멈춘다.
+        clock = [0.0]
+        real_string = a.Masker.string
+
+        def late_string(self, value):
+            clock[0] = a.MAX_PROCESS_SECONDS + 1.0
+            return real_string(self, value)
+
+        with patch.object(a.time, 'monotonic', lambda: clock[0]), patch.object(a.Masker, 'string', late_string):
+            with self.assertRaises(a.InputError) as caught:
+                a.model(SYNTHETIC)
+        self.assertIn('processing time limit exceeded', str(caught.exception))
+
+    def test_www_autolink_escaped_in_markdown(self):
+        self.assertEqual(a.md_line('see www.example.test now'), 'see www\\.example.test now')
+        self.assertEqual(a.md_line('WWW.example.test'), 'WWW\\.example.test')
+        self.assertEqual(a.md_line('(www.x.test)'), '(www\\.x.test)')
+        for kept in ('https://www.kernel.org/doc', 'awww.x', 'a.www.x', 'wwwx'):
+            self.assertNotIn('www\\.', a.md_line(kept), kept)
+
+    def test_public_references_still_readable(self):
+        text = report_with_detail('see https://docs.min.io/enterprise/aistor-object-store/ and node pool per drive')
+        body = self.bodies(text)['md']
+        self.assertIn('docs.min.io', body)
+        self.assertIn('node pool per drive', body)
+
+    def test_default_output_dir_matches_shell_entry(self):
+        if 'AISTOR_DIAG_OUTPUT_DIR' not in os.environ:
+            self.assertEqual(a.DEFAULT_OUTPUT_DIR, Path.home() / 'aistor-diag-output')
+        if not (ROOT / 'run-report.sh').is_file():
+            self.skipTest('run-report.sh not in this layout')
+        shell = (ROOT / 'run-report.sh').read_text(encoding='utf-8')
+        self.assertIn('OUT_DIR=$HOME/aistor-diag-output', shell)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

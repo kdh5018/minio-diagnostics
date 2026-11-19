@@ -49,7 +49,7 @@ python3 analyze.py --check-env
 python3 analyze.py --official-report /path/to/approved-report.md --mask strict
 ```
 
-기본 저장 경로는 `~/minio-airgap-diag-output`입니다.
+기본 저장 경로는 `~/aistor-diag-output`입니다.
 `AISTOR_DIAG_OUTPUT_DIR` 환경변수 또는 `--out-dir` 옵션으로 변경할 수 있으며,
 `--out-dir`이 우선합니다.
 
@@ -61,7 +61,7 @@ python3 analyze.py --official-report /path/to/approved-report.md --mask strict
 화면에 필요한 요소가 내장되어 있어 웹 서버는 필요하지 않습니다.
 Windows에서는 다음 WSL 경로로 열 수 있습니다.
 
-`\\wsl.localhost\<distribution>\home\<user>\minio-airgap-diag-output\<generation>\aistor-diag-report.html`.
+`\\wsl.localhost\<distribution>\home\<user>\aistor-diag-output\<generation>\aistor-diag-report.html`.
 
 ## R2 실행과 범위
 
@@ -121,7 +121,7 @@ Markdown 결합 시 알려진 Server/Endpoint 표와 수집 시각(허용 차이
 ```bash
 REPORT='/승인된/공식/보고서.md'
 HEALTH='/승인된/원본/진단.json.gz'
-OUT='/home/user/minio-airgap-diag-output'
+OUT='/home/user/aistor-diag-output'
 
 # 공식 보고서 단독: 검증 샘플에서는 종료 코드 0
 PYTHONDONTWRITEBYTECODE=1 python3 analyze.py \
@@ -143,7 +143,7 @@ CLI가 출력한 새 run 디렉터리의 `aistor-diag-report.html`을 직접 여
 WSL 배포 이름은 자신의 환경에서 확인하고 다음 경로의 `<distribution>`에 넣습니다.
 
 ```text
-\\wsl.localhost\<distribution>\home\user\minio-airgap-diag-output\run-<uuid>\aistor-diag-report.html
+\\wsl.localhost\<distribution>\home\user\aistor-diag-output\run-<uuid>\aistor-diag-report.html
 ```
 
 ### 이번 검증의 범위와 남은 조건

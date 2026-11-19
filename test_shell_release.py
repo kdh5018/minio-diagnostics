@@ -478,6 +478,26 @@ class ShellEntrypointTests(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertIn('동봉 Python', p.stdout)
 
+    def test_system_python_from_writable_location_refused(self):
+        # 0.5.6: 다른 사용자가 쓸 수 있는 PATH 위치의 python3는 쓰지 않는다.
+        bundle = self.make_bundle(runtime='stub')
+        loose = self.base / 'path-loose'
+        loose.mkdir()
+        (loose / 'python3').symlink_to(sys.executable)
+        os.chmod(loose, 0o777)
+        p = self.run_sh(bundle, '--check', '--use-system-python', env={'PATH': str(loose) + ':/usr/bin:/bin'})
+        self.assertEqual(p.returncode, 5)
+        self.assertIn('다른 사용자가 바꿀 수 있어', p.stderr)
+        os.chmod(loose, 0o755)
+        p = self.run_sh(bundle, '--check', '--use-system-python', env={'PATH': str(loose) + ':/usr/bin:/bin'})
+        if sys.version_info >= (3, 9):
+            self.assertEqual(p.returncode, 0, p.stderr)
+
+    def test_loader_injection_variables_cleared(self):
+        text = RUN.read_text(encoding='utf-8')
+        self.assertIn('unset LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT', text)
+        self.assertLess(text.index('unset LD_PRELOAD'), text.index('select_runtime() {'))
+
     def test_symlink_and_insecure_output_refused_without_changes(self):
         bundle = self.make_bundle(runtime='stub')
         report = self.write_input('in/r.md')

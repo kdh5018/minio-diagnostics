@@ -18,11 +18,11 @@ import sys
 import time
 import uuid
 
-VERSION = '0.5.5-r1'
+VERSION = '0.5.6-r1'
 SCHEMA_VERSION = '1.2-r1'
 PARSER_VERSION = 'official-markdown-r1-2'
 POLICY_VERSION = 'r1-1'
-DEFAULT_OUTPUT_DIR = Path(os.environ.get('AISTOR_DIAG_OUTPUT_DIR', str(Path.home() / 'minio-airgap-diag-output')))
+DEFAULT_OUTPUT_DIR = Path(os.environ.get('AISTOR_DIAG_OUTPUT_DIR', str(Path.home() / 'aistor-diag-output')))
 MAX_BYTES = 2 * 1024 * 1024
 MAX_LINES = 20000
 MAX_CHECKS = 1000
@@ -451,6 +451,11 @@ def md_line(line, cell=False, line_start=True):
             out.append('\\~')
         elif ch == '|' and cell:
             out.append('\\|')
+        elif ch in 'wW' and line[i:i + 4].lower() == 'www.' and not (prev and (prev.isalnum() or prev in '/.:@-_')):
+            # 0.5.6: GFM 확장 자동 링크(www.)가 생기지 않도록 점을 이스케이프한다. 표시 글자는 같다.
+            out.append(line[i:i + 3] + '\\.')
+            i += 4
+            continue
         else:
             out.append(ch)
         i += 1
@@ -680,11 +685,60 @@ def parse_report(text):
     return summary, collected, checks, sorted(set(notes))
 
 
+# --- 마스킹(0.5.6) --------------------------------------------------------------
+# 0.5.6 보안 점검(F1·F2·F3) 반영:
+# - 모든 패턴은 토큰 시작에서만 시작하고(왼쪽 경계) 반복 횟수에 상한을 둬 입력 길이에 선형으로 동작한다(ReDoS 방지).
+# - strict/basic 공통: 지원 목록 밖 도메인(.kr·.io 등 모든 2글자 국가 도메인과 주요 일반 도메인), JSON 형식 키,
+#   자격증명·라이선스 키, JWT, 인증서 주체(CN·O·OU·DNS), 이메일, MAC, UUID, 인증서 PEM 블록을 가린다.
+# - strict 전용: 포트 없는 짧은 호스트명(server·node·host 등 바로 뒤 이름), 이름 필드 값.
+# - 마스킹 뒤 출력 전체를 같은 탐지 규칙으로 다시 검사해 하나라도 남으면 보고서를 만들지 않는다(fail-closed).
+MASK_GTLDS = frozenset(
+    'com net org edu gov mil int arpa info biz name pro io ai app dev cloud tech online site xyz me tv cc co '
+    'local localdomain localhost internal intranet lan corp home svc cluster test example invalid onion '
+    'asia mobi jobs aero coop museum travel cat tel post global group company systems network services solutions '
+    'center digital world today live store shop page blog wiki email host hosting server'.split())
+# 2글자 확장자 중 파일 이름으로 흔한 것(국가 도메인과 겹침)은 호스트로 보지 않는다.
+MASK_FILE_EXT = frozenset('md sh py pl rs js ts gz xz bz so ko cs hs rb ps'.split())
+MASK_PUBLIC_HOSTS = frozenset('docs.min.io min.io www.kernel.org kernel.org docs.kernel.org tip.golang.org go.dev golang.org'.split())
+MASK_SECRET_WORDS = ('secretkey', 'accesskey', 'apikey', 'password', 'passwd', 'passphrase', 'token', 'authorization',
+                     'credential', 'rootuser', 'license', 'secret', 'privatekey', 'sessionkey', 'signature', 'cookie')
+MASK_HOST_STOPWORDS = frozenset(
+    'a an the and or of to in on for with by from at as per via into out up down off over under not no is are was were be been '
+    'being has have had do does did can cannot could will would should may might must shall this that these those it its each '
+    'all any some every both either neither other same such which who whom whose what when where why how than then there '
+    'here only also just more most less least many much few one two three four five six seven eight nine ten count counts '
+    'list name names pool pools set sets side status state info information error errors warning warnings failed failure '
+    'offline online unreachable reachable available unavailable healthy unhealthy ok time timeout version versions config '
+    'configuration process processes memory cpu cpus drive drives disk disks number numbers id ids type types level levels '
+    'address addresses port ports total value values check checks result results details detail table data group groups '
+    'role roles mode modes size sizes uptime local remote pod pods network networks storage capacity health '
+    'recommended required minimum maximum min max default current expected actual configured'.split())
+
+
 class Masker:
     """Best-effort redaction, followed by leak checks. No mapping file is emitted."""
-    secret = re.compile(r'''(?i)((?:secret[_ -]?key|access[_ -]?key|password|passwd|token|authorization)\s*[:=]\s*)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s|,;]+)''')
-    private = re.compile(r'-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----', re.S)
-    identifiers = re.compile(r'https?://[^\s<>\]\)]+|\b(?:[\w-]+\.)+(?:local|internal|svc|lan|com|net|org)(?::\d+)?\b|\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\b|(?<![\w.:/-])[A-Za-z][\w-]*(?:\.[\w-]+)*:\d{2,5}\b|(?:[A-Za-z]:\\|/)(?:[\w.@-]+[/\\])+[\w.@-]+', re.I)
+    # 키=값 형태의 자격증명. 키는 토큰 시작에서만 잡고(따옴표로 감싼 JSON 키 포함) 값 길이에 상한을 둔다.
+    secret = re.compile(r'''(?<![A-Za-z0-9_.-])(["']?)([A-Za-z][A-Za-z0-9_.-]{0,63})\1(\s*[:=]\s*|[ \t]+)'''
+                        r'''("(?:\\.|[^"\\\n]){0,4096}"|'(?:\\.|[^'\\\n]){0,4096}'|[^\s|,;"']{1,4096})''')
+    pem_begin = re.compile(r'-----BEGIN ([A-Z0-9 ]{1,40})-----')
+    pem_end = re.compile(r'-----END [A-Z0-9 ]{1,40}-----')
+    bearer = re.compile(r'(?i)(?<![A-Za-z0-9_])Bearer[ \t]+[^\s"\'<>|,;]{1,4096}')
+    jwt = re.compile(r'(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{4,8192}\.[A-Za-z0-9_-]{4,8192}\.[A-Za-z0-9_-]{0,8192}')
+    encoded = re.compile(r'(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{40,8192}={0,2}(?![A-Za-z0-9+/=])')
+    email = re.compile(r'(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63}){0,126}')
+    subject = re.compile(r'(?<![A-Za-z0-9_])((?:CN|OU|O|emailAddress)[ \t]*=[ \t]*|(?:CN|DNS|URI)[ \t]*:[ \t]*)([^,/\n\r"\'|<>+;]{1,253})')
+    mac = re.compile(r'(?<![0-9A-Fa-f:.-])[0-9A-Fa-f]{2}([:-])[0-9A-Fa-f]{2}(?:\1[0-9A-Fa-f]{2}){4}(?![0-9A-Fa-f:.-])')
+    uuid_re = re.compile(r'(?<![0-9A-Fa-f-])[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}(?![0-9A-Fa-f-])')
+    host = re.compile(r'(?<![A-Za-z0-9_.-])[A-Za-z0-9][A-Za-z0-9_-]{0,62}(?:\.[A-Za-z0-9_-]{1,63}){1,126}')
+    identifiers = re.compile(r'(?P<url>https?://[^\s<>\]\)]{1,8192})'
+                             r'|(?P<ip4>(?<![0-9.])(?:\d{1,3}\.){3}\d{1,3}(?::\d{1,5})?(?![0-9]))'
+                             r'|(?P<hp>(?<![\w.:/-])[A-Za-z][\w-]{0,62}(?:\.[\w-]{1,63}){0,126}:\d{2,5}(?!\d))'
+                             r'|(?P<path>(?<![\w.@/\\-])(?:[A-Za-z]:\\|/)(?:[\w.@-]{1,255}[/\\]){1,64}[\w.@-]{1,255})', re.I)
+    short_host = re.compile(r'(?i)(?<![A-Za-z0-9_-])(servers?|hosts?|hostname|nodes?|peers?|endpoints?|instances?|machine)'
+                            r'([ \t]*[:=][ \t]*|[ \t]+)(["\']?)([A-Za-z][A-Za-z0-9-]{0,62})(?![A-Za-z0-9_.@-])')
+    name_field = re.compile(r'(?i)(?<![A-Za-z0-9_])((?:bucket|object|policy|cluster|deployment)(?:[_ -]?name)?[ \t]*[:=][ \t]*)([^\s|,;]{1,4096})')
+    ipv4_leak = re.compile(r'(?<![0-9.])(?:\d{1,3}\.){3}\d{1,3}(?![0-9])')
+    token = re.compile(r'[A-Za-z0-9_.-]{1,512}')
     # 0.4.1: 고객 조치 안내에 필요한 표준 커널·부팅 설정 경로와 공개 문서 URL만 원문으로 둔다.
     # 호스트명·IP·장치 식별자가 들어갈 수 있는 경로(/dev, /sys/class/net, /sys/block 등)는 계속 가린다.
     public_path = re.compile(r'/proc/(?:cmdline|meminfo|cpuinfo|sys/(?:kernel|vm|fs)(?:/[a-z0-9_]+)+)'
@@ -694,13 +748,47 @@ class Masker:
     public_url = re.compile(r'https://(?:docs\.min\.io|min\.io|www\.kernel\.org|kernel\.org|docs\.kernel\.org|tip\.golang\.org|go\.dev|golang\.org)'
                             r'(?:/[A-Za-z0-9._~%+-]+)*/?(?:\?highlight=[A-Za-z0-9_+-]{1,40})?(?:#[A-Za-z0-9._-]{1,80})?')
     trailing = '.,;:`\'"'
+    placeholder = re.compile(r'identifier-\d{3,}|\[(?:REDACTED|MASKED|JWT REMOVED|ENCODED VALUE REMOVED|PEM BLOCK REMOVED|PRIVATE KEY REMOVED)\]')
 
-    ipv6 = re.compile(r'(?<![\w:])(?:[0-9a-f]{0,4}:){2,}[0-9a-f:]{1,4}(?:%[\w-]+)?(?![\w:])', re.I)
+    ipv6 = re.compile(r'(?<![\w:])(?:[0-9a-f]{0,4}:){2,8}[0-9a-f:]{1,4}(?:%[\w-]{1,32})?(?![\w:])', re.I)
 
-    def __init__(self, level, public_check_ids=()):
+    def __init__(self, level, public_check_ids=(), *, public_tokens=(), deadline=None):
         self.level = level
         self.aliases = {}
         self.public_check_ids = frozenset(public_check_ids)
+        # 본문에 그대로 둘 공개 토큰(공식 검사 ID 등). 호스트 판정에서만 쓴다.
+        self.public_tokens = frozenset(t.lower() for t in tuple(public_check_ids) + tuple(public_tokens))
+        self.deadline = deadline
+        self._ticks = 0
+
+    def tick(self):
+        if self.deadline is not None:
+            self._ticks += 1
+            if self._ticks % 256 == 0:
+                check_deadline(self.deadline)
+
+    # -- 판정 함수: 마스킹과 사후 검증이 같은 기준을 쓴다 ----------------------------
+    def host_sensitive(self, value):
+        host = value.rstrip('.').lower()
+        if '_' in host or host in self.public_tokens or host in MASK_PUBLIC_HOSTS:
+            return False
+        tld = host.rsplit('.', 1)[-1]
+        if not tld.isascii() or not tld.isalpha() or tld in MASK_FILE_EXT:
+            return False
+        return len(tld) == 2 or tld in MASK_GTLDS
+
+    @staticmethod
+    def secret_key(key, separator):
+        norm = re.sub(r'[^a-z0-9]', '', key.lower())
+        if not any(word in norm for word in MASK_SECRET_WORDS):
+            return False
+        if separator.strip():
+            return True
+        # 공백 구분(KEY value)은 환경변수 형태(대문자·밑줄) 키만 자격증명으로 본다.
+        return bool(re.fullmatch(r'[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+', key))
+
+    def is_placeholder(self, value):
+        return bool(self.placeholder.fullmatch(value.strip('"\'').rstrip(self.trailing)))
 
     def is_public(self, value):
         core = value.rstrip(self.trailing)
@@ -709,53 +797,191 @@ class Masker:
         if self.public_url.fullmatch(core):
             rest = core.split('/', 3)[3] if core.count('/') >= 3 else ''
             # 경로·조각 안에 주소·도메인 형태가 끼어 있으면 공개 URL로 보지 않는다.
-            return not re.search(r'\d{1,3}(?:\.\d{1,3}){3}|(?:[\w-]+\.)+(?:local|internal|svc|lan|com|net|org)\b|@', rest, re.I)
+            return not (self.ipv4_leak.search(rest) or '@' in rest
+                        or any(self.host_sensitive(m.group(0)) for m in self.host.finditer(rest)))
         return False
 
-    def alias(self, match):
-        value = match.group(0)
-        if self.is_public(value):
+    def alias_value(self, value):
+        self.tick()
+        if self.is_public(value) or self.is_placeholder(value):
             return value
         if value not in self.aliases:
             self.aliases[value] = 'identifier-%03d' % (len(self.aliases) + 1)
         return self.aliases[value]
 
-    def string(self, text):
-        text = self.private.sub('[PRIVATE KEY REMOVED]', text)
-        text = re.sub(r'(?i)\bBearer\s+\S+', 'Bearer [REDACTED]', text)
-        text = self.secret.sub(lambda m: m.group(1) + '[REDACTED]', text)
-        text = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', text)
-        text = ''.join(c for c in text if c in '\n\t' or ord(c) >= 32 and ord(c) != 127)
-        text = self.identifiers.sub(self.alias, text)
-        def ipv6_alias(match):
-            try:
-                address = ipaddress.ip_address(match.group(0).split('%', 1)[0])
-            except ValueError:
-                return match.group(0)
-            return self.alias(match) if address.version == 6 else match.group(0)
-        text = self.ipv6.sub(ipv6_alias, text)
-        if self.level == 'strict':
-            text = re.sub(r'(?i)((?:bucket|object|policy|cluster|deployment)(?:[_ -]?name)?\s*[:=]\s*)([^\s|,;]+)', lambda m: m.group(1) + '[MASKED]', text)
-        return text
+    def alias(self, match):
+        return self.alias_value(match.group(0))
 
-    def apply(self, value, *, for_verification=False):
-        if isinstance(value, str):
-            return value if for_verification else self.string(value)
-        if isinstance(value, list):
-            return [self.apply(x, for_verification=for_verification) for x in value]
-        if isinstance(value, dict):
-            return {k: ('[PUBLIC CHECK ID]' if for_verification else v)
-                    if k == 'source_check_id' and isinstance(v, str) and v in self.public_check_ids
-                    else self.apply(v, for_verification=for_verification) for k, v in value.items()}
+    # -- 단계별 치환 ------------------------------------------------------------
+    def strip_pem(self, text):
+        if '-----' not in text:
+            return text
+        out, pos = [], 0
+        while True:
+            begin = self.pem_begin.search(text, pos)
+            if not begin:
+                break
+            out.append(text[pos:begin.start()])
+            end = self.pem_end.search(text, begin.end())
+            out.append('[PRIVATE KEY REMOVED]' if 'PRIVATE KEY' in begin.group(1) else '[PEM BLOCK REMOVED]')
+            if not end:
+                pos = len(text)  # 닫히지 않은 블록은 끝까지 버린다(fail-closed).
+                break
+            pos = end.end()
+        out.append(text[pos:])
+        return self.pem_end.sub('[PEM BLOCK REMOVED]', ''.join(out))
+
+    def _secret_sub(self, match):
+        self.tick()
+        quote, key, separator, value = match.groups()
+        if not self.secret_key(key, separator) or self.is_placeholder(value):
+            return match.group(0)
+        return quote + key + quote + separator + '[REDACTED]'
+
+    def _subject_sub(self, match):
+        value = match.group(2).rstrip(' \t.')
+        if not value or self.is_placeholder(value):
+            return match.group(0)
+        return match.group(1) + self.alias_value(value) + match.group(2)[len(value):]
+
+    @staticmethod
+    def _encoded_sub(match):
+        value = match.group(0)
+        if any(c.isdigit() for c in value) and any(c.isupper() for c in value) and any(c.islower() for c in value):
+            return '[ENCODED VALUE REMOVED]'
         return value
 
+    def _host_sub(self, match):
+        self.tick()
+        return self.alias_value(match.group(0)) if self.host_sensitive(match.group(0)) else match.group(0)
+
+    def _short_host_sub(self, match):
+        self.tick()
+        name = match.group(4)
+        if name.lower() in MASK_HOST_STOPWORDS or self.is_placeholder(name):
+            return match.group(0)
+        return match.group(1) + match.group(2) + match.group(3) + self.alias_value(name)
+
+    def _ipv6_sub(self, match):
+        try:
+            address = ipaddress.ip_address(match.group(0).split('%', 1)[0])
+        except ValueError:
+            return match.group(0)
+        return self.alias(match) if address.version == 6 else match.group(0)
+
+    def string(self, text):
+        if self.deadline is not None:
+            check_deadline(self.deadline)
+        text = self.strip_pem(text)
+        text = self.bearer.sub('Bearer [REDACTED]', text)
+        text = self.secret.sub(self._secret_sub, text)
+        text = self.jwt.sub('[JWT REMOVED]', text)
+        text = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', text)
+        text = ''.join(c for c in text if c in '\n\t' or ord(c) >= 32 and ord(c) != 127)
+        text = self.email.sub(self.alias, text)
+        text = self.subject.sub(self._subject_sub, text)
+        text = self.identifiers.sub(self.alias, text)
+        text = self.host.sub(self._host_sub, text)
+        text = self.mac.sub(self.alias, text)
+        text = self.uuid_re.sub(self.alias, text)
+        text = self.ipv6.sub(self._ipv6_sub, text)
+        text = self.encoded.sub(self._encoded_sub, text)
+        if self.level == 'strict':
+            text = self.short_host.sub(self._short_host_sub, text)
+            text = self.name_field.sub(lambda m: m.group(1) + '[MASKED]', text)
+        if self.deadline is not None:
+            check_deadline(self.deadline)
+        return text
+
+    def _known_tokens(self, text):
+        """2차 치환: 한 곳에서 가린 이름(짧은 호스트명 등)이 다른 문장에 맨 이름으로 남지 않게 한다."""
+        def sub(match):
+            value = match.group(0)
+            core = value.rstrip('.')
+            alias = self.aliases.get(core)
+            return alias + value[len(core):] if alias else value
+        return self.token.sub(sub, text)
+
+    def _walk(self, value, fn):
+        if isinstance(value, str):
+            return fn(value)
+        if isinstance(value, list):
+            return [self._walk(x, fn) for x in value]
+        if isinstance(value, dict):
+            return {k: v if k == 'source_check_id' and isinstance(v, str) and v in self.public_check_ids
+                    else self._walk(v, fn) for k, v in value.items()}
+        return value
+
+    def apply(self, value, *, for_verification=False):
+        if for_verification:
+            if isinstance(value, dict):
+                return {k: '[PUBLIC CHECK ID]' if k == 'source_check_id' and isinstance(v, str) and v in self.public_check_ids
+                        else self.apply(v, for_verification=True) for k, v in value.items()}
+            if isinstance(value, list):
+                return [self.apply(x, for_verification=True) for x in value]
+            return value
+        masked = self._walk(value, self.string)
+        if any(self.token.fullmatch(original) for original in self.aliases):
+            masked = self._walk(masked, self._known_tokens)
+        return masked
+
+    # -- 사후 검증: 남으면 안 되는 형태 -------------------------------------------
+    def leaks(self, text):
+        """Return the kinds of sensitive shapes still present in already-masked text."""
+        found = []
+        if '-----BEGIN ' in text or '-----END ' in text:
+            found.append('pem')
+        tokens = None
+        for original in self.aliases:
+            if self.token.fullmatch(original):
+                if tokens is None:
+                    tokens = {m.group(0).rstrip('.') for m in self.token.finditer(text)}
+                if original in tokens:
+                    found.append('alias')
+                    break
+            elif original in text:
+                found.append('alias')
+                break
+        for match in self.secret.finditer(text):
+            quote, key, separator, value = match.groups()
+            if self.secret_key(key, separator) and not self.is_placeholder(value):
+                found.append('secret')
+                break
+        if self.jwt.search(text):
+            found.append('jwt')
+        if self.email.search(text):
+            found.append('email')
+        if self.mac.search(text):
+            found.append('mac')
+        if self.uuid_re.search(text):
+            found.append('uuid')
+        if self.ipv4_leak.search(text):
+            found.append('ipv4')
+        if any(self.host_sensitive(m.group(0)) and not self.is_public(m.group(0)) for m in self.host.finditer(text)):
+            found.append('host')
+        for match in self.subject.finditer(text):
+            value = match.group(2).rstrip(' \t.')
+            if value and not self.is_placeholder(value):
+                found.append('subject')
+                break
+        return found
+
     def verify(self, value):
-        dumped = json.dumps(self.apply(value, for_verification=True), ensure_ascii=False)
-        if any(original in dumped for original in self.aliases) or '-----BEGIN ' in dumped:
+        problems = set()
+        def scan(item):
+            if isinstance(item, str):
+                problems.update(self.leaks(item))
+            elif isinstance(item, list):
+                for x in item:
+                    scan(x)
+            elif isinstance(item, dict):
+                for x in item.values():
+                    scan(x)
+        scan(self.apply(value, for_verification=True))
+        if problems & {'secret', 'jwt'}:
+            raise OutputError('secret verification failed')
+        if problems:
             raise OutputError('redaction verification failed')
-        for match in self.secret.finditer(dumped):
-            if not match.group(2).startswith('[REDACTED]'):
-                raise OutputError('secret verification failed')
 
 
 # --- 한글 해결방안(0.5.4) ------------------------------------------------------
@@ -1064,7 +1290,8 @@ def model(text, mask='strict', as_of=None, parsed=None):
               'parser_errors': notes, 'run_status': 'partial' if notes else 'success',
               'completeness': {'source_coverage': 'official_summary_and_provided_details', 'requested_scope_satisfied': not notes},
               'masking': {'level': mask, 'policy_version': 'r1-1', 'limitations': '자동 마스킹의 완전성을 보장하지 않습니다. 공유 전 수동 검토가 필요합니다.'}}
-    masker = Masker(mask, public_check_ids=explain)
+    # 0.5.6: 처리 시간 제한을 마스킹 도중에도 적용한다(이전에는 마스킹이 끝난 뒤에만 확인).
+    masker = Masker(mask, public_check_ids=explain, deadline=started + MAX_PROCESS_SECONDS)
     report = masker.apply(report)
     masker.verify(report)
     # 0.5.4: 한글 해결방안은 입력과 무관한 고정 문구라 마스킹·검증 뒤에 붙인다(공식 판정·수치는 그대로).
