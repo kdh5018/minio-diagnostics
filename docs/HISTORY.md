@@ -221,3 +221,10 @@ strict·basic 마스킹에 지원 목록 밖 도메인 호스트, JSON `"accessK
 그 밖에 Markdown `www.` 자동 링크 차단, 소스 실행 기본 출력 폴더를 `~/aistor-diag-output`으로 통일, `run-report.sh`의 로더 변수 제거와 쓰기 가능한 위치의 시스템 python3 거부.
 공식 판정·숫자, 종료 코드 의미, 120초 결합 허용치, 자원 제한은 그대로입니다.
 상세는 [IMPROVEMENT_PLAN.md](IMPROVEMENT_PLAN.md)의 "0.5.6".
+
+### 2026-11-19 0.5.7 콜론 뒤 IPv4 회귀 수정(Shield 0.5.6 재점검)
+
+0.5.6에서 `IP Address:10.44.33.22`·`addr:10.1.2.3`·`host:10.0.0.5:9000`처럼 콜론 바로 뒤에 IPv4가 오면 호스트:포트 규칙이 먼저 잡혀 사후 검증이 보고서 전체를 막았습니다(셸 종료 코드 3). 포트 뒤가 `.숫자`면 IPv4로 처리하도록 고쳤습니다.
+같이 고친 것: `license: Enterprise`·`drive.id`·`status.ok`·`resolution` 과마스킹, `(CN=minio)` 닫는 괄호 보존. `--secret-key X`·`--access-key=X`·`access key: X`·`accessKey => X`·`pass=`·`pwd:`·AKIA 형식 키·`scheme://user:pass@`·밑줄 든 도메인 호스트·점 표기 MAC 마스킹.
+공식 판정·숫자, 종료 코드 의미, 120초 결합 허용치, 자원 제한은 그대로이며 실자료 보고서는 0.5.5·0.5.6과 같습니다.
+상세는 [IMPROVEMENT_PLAN.md](IMPROVEMENT_PLAN.md)의 "0.5.7".
