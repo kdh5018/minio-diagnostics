@@ -14,8 +14,8 @@ import zlib
 import aistordoctor as a
 import r2_enrichment as enrichment
 
-VERSION = '0.5.4-r2'
-SCHEMA_VERSION = '1.4-r2'
+VERSION = '0.5.5-r2'
+SCHEMA_VERSION = '1.5-r2'
 MAX_COMPRESSED = 32 * 1024 * 1024
 MAX_EXPANDED = 64 * 1024 * 1024
 MAX_DEPTH = 64
@@ -280,8 +280,8 @@ def conflict_lines(detail):
     return lines
 
 
-COLLECTION_ADVICE = ('이 항목은 설정 변경 대상이 아니라 수집 범위 표시입니다. 오류가 난 영역(예: CPU 주파수 정책, NIC ring)은 '
-                     '이 보고서에서 값이 수집되지 않았으며, 이 도구는 해당 값으로 판정하지 않습니다.')
+# 0.5.5: 자체 점검 결과(check_results·custom_rule_*)는 내부용이며 보고서에 표시하지 않는다는 JSON 표지.
+CUSTOM_RULE_DISPLAY = 'internal_only_not_displayed'
 
 
 def report(body, documents=1, official_text=None, as_of=None, mask='strict'):
@@ -331,21 +331,12 @@ def report(body, documents=1, official_text=None, as_of=None, mask='strict'):
         notes.append('collection error count incomplete')
     r['parser_errors'].extend(notes)
     r['check_results'].extend(checks)
-    for c in checks:
-        if c['rule_result'] == 'pass':
-            continue
-        # 0.5.3: 경고·실패만 P2. 정보(수집 오류 기록)와 미평가는 미분류.
-        r['findings'].append(dict(c, assessment_reason=c['reason'], priority='P2' if c['rule_result'] in ('warning', 'fail') else 'unclassified',
-            observed='자체 점검 결과: ' + a.result_text(c['rule_result']) + ' / ' + a.label(c['reason']), detail=c['condition'],
-            evidence_blocks=[], recommendation=COLLECTION_ADVICE if c['rule_id'] == 'r2.collection.errors' else
-            '원본 관측과 실제 대상을 읽기 전용으로 대조하십시오. 자동 조치는 수행하지 않습니다.',
-            impact='현재 서비스 상태·데이터 안전성·원인을 확정하지 않습니다.',
-            # 0.5.2(B2): 수집 오류는 설정 변경 대상이 아니므로 승인 불필요.
-            approval_required=(c['rule_id'] != 'r2.collection.errors') if c['rule_result'] else None,
-            verification_steps=['필요한 입력과 의미를 확인한 뒤 동일 조건으로 재점검합니다.'], limitations=[c['condition']],
-            resolution_ko={'status': 'not_applicable', 'reason': 'custom_rule_not_official_check', 'blocks': []}))  # 0.5.4
-    r['analysis_summary'] = {'custom_rule_counts': dict(Counter(c['rule_result'] or 'not_evaluated' for c in checks)),
-                             'custom_rule_catalog': {c['rule_id']: {'version': c['rule_version'], 'required_inputs': c['required_inputs'], 'condition': c['condition']} for c in checks}}
+    # 0.5.5(스키마 1.5-r2): 자체 점검 결과는 findings(화면 카드·우선순위·--fail-on-priority 기준)에 넣지 않는다.
+    # check_results와 custom_rule_*는 내부용으로 남기며 보고서 화면·Markdown에는 표시하지 않는다.
+    r['analysis_summary'] = dict(r.get('analysis_summary') or {},
+                                 custom_rule_counts=dict(Counter(c['rule_result'] or 'not_evaluated' for c in checks)),
+                                 custom_rule_catalog={c['rule_id']: {'version': c['rule_version'], 'required_inputs': c['required_inputs'], 'condition': c['condition']} for c in checks},
+                                 custom_rule_display=CUSTOM_RULE_DISPLAY)
     partial = bool(r['parser_errors']) or any(c['rule_result'] is None for c in checks if c['rule_id'] != 'r2.version.consistency')
     r['run_status'] = 'partial' if partial else 'success'
     r['completeness'] = {'source_coverage': 'explicit_allowlist_subset', 'requested_scope_satisfied': not partial and all(c['rule_result'] is not None for c in checks),
@@ -354,45 +345,35 @@ def report(body, documents=1, official_text=None, as_of=None, mask='strict'):
 
 
 def view(r):
-    # Presentation labels never alter the serialized official_status=null contract.
+    """Presentation copy: official cards get per-server raw values (0.5.5). Never written to JSON."""
     v = copy.deepcopy(r)
-    for f in v['findings']:
-        if f['origin'] == 'custom_rule':
-            f['official_status'] = '해당 없음 / 자체 결과: ' + (f['rule_result'] or '미평가')
-    v['facts']['custom_check_results'] = r['check_results']
+    v['findings'] = a.official_cards(v['findings'])
     n = v['facts'].get('health')
     if isinstance(n, dict):
         for f in v['findings']:
-            if f['origin'] == 'custom_rule':
-                f['observed_values'] = observed_values(f['rule_id'], n)  # 0.5.2(C3): 표시용(JSON에는 넣지 않음)
+            obs = server_observations(f.get('source_check_id'), n)
+            if obs:
+                f['server_observations'] = obs
     return v
 
 
-def observed_values(rule_id, n):
-    """Per-server observations already in the report (allowlisted fields only), for a custom-rule card."""
+def iommu_text(c):
+    flags = ', '.join('%s=%s' % (k, v if v is not None else '모호') for k, v in sorted(c['iommu_flags'].items()))
+    return flags or ('명시 옵션 없음' if c.get('proc_cmdline_observed', True) else '부팅 옵션 기록 없음')
+
+
+def server_observations(check_id, n):
+    """0.5.5: per-server values from the gzip for the official THP/IOMMU card. Facts only, no verdict or rule text."""
     configs = n.get('system_configurations') or []
+    if not configs:
+        return None
     who = lambda c: c.get('server_id') or c['id'] + ' (대상 미확인)'
-    if rule_id == 'r2.thp.mode':
-        return ['%s: enabled=%s, defrag=%s, max_ptes_none=%s' % (who(c), *(a.MISSING if c.get(k) is None else c[k] for k, _ in THP_COLUMNS))
-                for c in configs]
-    if rule_id == 'r2.iommu.consistency':
-        return ['%s: %s' % (who(c), ', '.join('%s=%s' % (k, v if v is not None else '모호') for k, v in sorted(c['iommu_flags'].items()))
-                            or ('명시 옵션 없음' if c.get('proc_cmdline_observed', True) else '부팅 옵션 기록 없음')) for c in configs]
-    if rule_id == 'r2.collection.errors':
-        return ['%s %s행(%s)' % (SECTION_LABELS.get(k, k), v['reported_errors'], ', '.join('%s %s' % kv for kv in (v.get('error_types') or {}).items()))
-                for k, v in n['collection']['sections'].items() if v.get('reported_errors')] or ['오류가 기록된 행 없음']
-    if rule_id in ('r2.drive.state', 'r2.capacity.bounds'):
-        states = Counter(d.get('state') or '미확인' for d in n['drives'])
-        out = ['드라이브 기록 %d개: %s' % (len(n['drives']), ', '.join('%s %d' % kv for kv in sorted(states.items())))]
-        bad = [d['id'] for d in n['drives'] if None not in (d['totalspace'], d['usedspace'], d['availspace'])
-               and (d['usedspace'] > d['totalspace'] or d['availspace'] > d['totalspace'])]
-        return out + (['범위를 벗어난 카운터: ' + ', '.join(bad)] if rule_id == 'r2.capacity.bounds' and bad else [])
-    if rule_id == 'r2.version.consistency':
-        return ['%s: %s' % (s['id'], s['version'] or a.MISSING) for s in n['servers']]
-    if rule_id == 'r2.tls.validity':
-        return ['%s: %s ~ %s' % (c['id'], a.with_kst(c['not_before']) or a.MISSING, a.with_kst(c['not_after']) or a.MISSING) for c in n['certificates']] or \
-            ['인증서 기록 없음(TLS 꺼짐 또는 미제공)']
-    return []
+    if check_id == 'sys.mem.thp':
+        return {'headers': ['서버', 'THP enabled', 'THP defrag', 'max_ptes_none'],
+                'rows': [[who(c)] + [c.get(k) for k, _ in THP_COLUMNS] for c in configs]}
+    if check_id == 'sys.mem.iommu':
+        return {'headers': ['서버', '명시적 IOMMU 부팅 옵션'], 'rows': [[who(c), iommu_text(c)] for c in configs]}
+    return None
 
 
 SECTION_LABELS = {'cpus': 'CPU 정보', 'netinfo': '네트워크 정보', 'partitions': '파티션', 'osinfo': 'OS 정보',
@@ -433,20 +414,20 @@ def observation_blocks(r):
                 for d in n['drives']])]
     # 0.5.2(A3): 자체 점검 r2.tls.validity가 본 인증서(별칭·유효기간만, 주체·SAN은 내보내지 않음).
     certs = n.get('certificates') or []
-    blocks.append(('h', 3, '인증서 기록(원본 gzip, 자체 점검 r2.tls.validity 입력)'))
+    blocks.append(('h', 3, '인증서 기록(원본 gzip)'))
     blocks.append(('table', ['인증서 별칭', '유효 시작', '만료', '원본 JSON 위치'],
                    [(c['id'], a.with_kst(c['not_before']), a.with_kst(c['not_after']), c['source_locator']['json_path']) for c in certs])
-                  if certs else ('p', '인증서 기록 없음(TLS 꺼짐 또는 미제공). r2.tls.validity는 미평가로 남습니다.'))
+                  if certs else ('p', '인증서 기록 없음(TLS 꺼짐 또는 미제공).'))
     configs = n.get('system_configurations') or []
     if configs:
         blocks += [('h', 3, '시스템 설정 관측(THP·IOMMU·rlimit)'),
-                   ('p', '자체 점검의 THP 권장값: enabled=madvise, defrag=defer+madvise 또는 madvise, max_ptes_none=0 (공식 sys.mem.thp Resolution 기준, 공식 판정은 별도).'),
+                   ('p', '공식 sys.mem.thp Resolution의 THP 권장값: enabled=madvise, defrag=defer+madvise 또는 madvise, max_ptes_none=0 (판정은 공식 검사 결과만).'),
                    ('table', ['설정 별칭', '서버 별칭', 'THP enabled', 'THP defrag', 'max_ptes_none', 'rlimit-max', '명시적 IOMMU 옵션'],
                     [(c['id'], c['server_id'], c['thp_enabled'], c['thp_defrag'], c['thp_max_ptes_none'], c['rlimit_max'],
                       ', '.join('%s=%s' % (k, v if v is not None else '모호') for k, v in sorted(c['iommu_flags'].items())) or '명시 없음')
                      for c in configs])]
     collection = n['collection']
-    blocks += [('h', 3, '원본 수집 오류 (공식 검사 오류와 별도)'),
+    blocks += [('h', 3, '수집되지 않은 항목 (원본 gzip의 오류 기록, 공식 검사와 별도)'),
                ('kv', '지원 필드에서 오류가 기록된 행 수: ', error_count_text(collection)),
                ('p', '오류 본문·내부 주소는 내보내지 않습니다. 기록이 없다는 것은 전체 수집 성공의 증거가 아닙니다.')]
     reasons = collection.get('incomplete_reasons') or []
@@ -598,8 +579,8 @@ def collection_html(n):
             continue
         errs = v['reported_errors']
         bars.append('<li class="cbar"><span class="cbar-k">%s</span><span class="cbar-track"><span class="cbar-fill%s" style="width:%.1f%%"></span></span>'
-                    '<span class="cbar-t">%s오류 행 %d / 기록 %d</span></li>' % (
-                        a.esc(name), ' zero' if not errs else '', errs * 100.0 / peak if errs else 0, '✖ ' if errs else '', errs, v['records']))
+                    '<span class="cbar-t">오류 기록 행 %d / 기록 %d</span></li>' % (
+                        a.esc(name), ' zero' if not errs else '', errs * 100.0 / peak if errs else 0, errs, v['records']))
     types = collection.get('error_type_counts') or {}
     subjects, kinds = [], []
     for key in types:
@@ -622,9 +603,11 @@ def collection_html(n):
     reasons = collection.get('incomplete_reasons') or []
     caveat = ' 전체 수 미확정: ' + ', '.join(INCOMPLETE_LABELS.get(x) or ('형식 이상 행: ' + SECTION_LABELS.get(x.split(':', 1)[-1], x)) for x in reasons) + '.' if reasons else ''
     count = error_count_text(collection)
-    return ('<section id="collection" aria-labelledby="collection-h"><h2 id="collection-h">수집 오류 (공식 검사 오류와 별도)</h2>'
-            '<p class="note">오류가 기록된 행: <strong>%s</strong>. 오류 본문·내부 주소는 내보내지 않습니다. 기록이 없다는 것은 전체 수집 성공의 증거가 아닙니다.%s</p>'
-            '<h3>수집 영역별 오류 행</h3><ul class="cbars">%s</ul>%s</section>') % (
+    # 0.5.5: 등급(경고·정보) 없이 부록의 '수집되지 않은 항목' 안내로만 둔다.
+    return ('<section id="uncollected"><details class="appendix"><summary>부록: 수집되지 않은 항목 (영역·대상·유형 집계)</summary>'
+            '<p class="note">원본 gzip에서 오류가 기록돼 값이 수집되지 않은 행: <strong>%s</strong>. 이 도구는 이 값으로 판정하지 않으며 설정 변경 대상도 아닙니다. '
+            '오류 본문·내부 주소는 내보내지 않습니다. 기록이 없다는 것은 전체 수집 성공의 증거가 아닙니다.%s</p>'
+            '<h3>수집 영역별</h3><ul class="cbars">%s</ul>%s</details></section>') % (
         a.esc(a.MISSING if count is None else count), a.esc(caveat), ''.join(bars), heat)
 
 
@@ -646,10 +629,10 @@ td.c-bad strong,td.c-warn strong{color:inherit}
 .cbars{list-style:none;padding:0;margin:0;display:grid;gap:6px;max-width:760px}
 .cbar{display:grid;grid-template-columns:130px minmax(80px,1fr) 150px;gap:10px;align-items:center;font-size:14px}
 .cbar.na{color:var(--muted)}.cbar.na .cbar-t{grid-column:2/4}
-.cbar-track{height:14px;background:var(--bar);border-radius:4px;overflow:hidden}.cbar-fill{display:block;height:100%;background:var(--error)}
+.cbar-track{height:14px;background:var(--bar);border-radius:4px;overflow:hidden}.cbar-fill{display:block;height:100%;background:var(--muted)}
 .heatmap td{text-align:center;min-width:90px;font-weight:700}.heat.h0{color:var(--muted);font-weight:400}
-.heat.h1{background:color-mix(in srgb,var(--error) 18%,var(--card))}.heat.h2{background:color-mix(in srgb,var(--error) 35%,var(--card))}
-.heat.h3{background:color-mix(in srgb,var(--error) 55%,var(--card))}.heat.h4{background:color-mix(in srgb,var(--error) 75%,var(--card));color:#fff}
+.heat.h1{background:color-mix(in srgb,var(--muted) 18%,var(--card))}.heat.h2{background:color-mix(in srgb,var(--muted) 35%,var(--card))}
+.heat.h3{background:color-mix(in srgb,var(--muted) 55%,var(--card))}.heat.h4{background:color-mix(in srgb,var(--muted) 75%,var(--card));color:#fff}
 @media (max-width:600px){.cbar{grid-template-columns:1fr}}
 </style>'''
 
@@ -660,23 +643,22 @@ def health_dashboard(r, n):
     link = (r.get('input_link') or {}).get('status')
     return ('<div class="panel"><h3>원본 관측 (gzip)</h3><div class="tiles">%s%s%s</div><p class="note">입력 결합: %s</p></div>') % (
         a.tile('info', '서버 기록', len(n['servers'])),
-        a.tile('error' if states['offline'] else 'info', '드라이브 기록', len(n['drives']),
-               'ok %d · offline %d · 미확인 %d' % (states['ok'], states['offline'], states['unknown'])),
-        a.tile('info', '수집 오류 행', count, '정보 등급(경고 아님)' if count else ''), a.esc(a.plain(a.label(link))))
+        a.tile('info', '드라이브 기록', len(n['drives']),
+               '관측 상태 ok %d · offline %d · 미확인 %d' % (states['ok'], states['offline'], states['unknown'])),
+        a.tile('info', '수집되지 않은 행', count, '부록 참고(판정 아님)' if count else ''), a.esc(a.plain(a.label(link))))
 
 
 def html_report(r):
     v = view(r)
     n = r.get('facts', {}).get('health')
-    # 필터 값(value)은 data-status와 같은 원래 문자열, 보이는 글자는 한국어로 둔다.
-    labels = sorted({(f['official_status'], a.status_text(f)) for f, _ in a.card_groups(v['findings']) if f['origin'] == 'custom_rule'})
     sections, extra, raw = [], '', []
     if isinstance(n, dict):
         extra = health_dashboard(r, n)
-        sections = [('topology', '서버 × 드라이브', drive_grid_html(n)), config_table_html(n), ('collection', '수집 오류', collection_html(n))]
-        raw = [('raw', '원본 관측 표', '<section id="raw"><details class="appendix"><summary>원본 관측 표 전체 (서버·드라이브·설정·수집 영역)</summary>%s</details></section>'
+        sections = [('topology', '서버 × 드라이브', drive_grid_html(n)), config_table_html(n)]
+        raw = [('uncollected', '수집되지 않은 항목', collection_html(n)),
+               ('raw', '원본 관측 표', '<section id="raw"><details class="appendix"><summary>원본 관측 표 전체 (서버·드라이브·설정·수집 영역)</summary>%s</details></section>'
                 % observations_html(r))]
-    page = a.html_page(v, sections=sections, dashboard_extra=extra, status_options=labels,
+    page = a.html_page(v, sections=sections, dashboard_extra=extra,
                        categories=a.R1_CATEGORIES + ('용량',), before_appendix=raw)
     return page.replace('</style>', '</style>' + R2_CSS, 1)
 
@@ -744,6 +726,6 @@ def main(argv=None):
     if r['run_status'] == 'partial':
         return 4
     # R1과 같은 의미: 지정한 우선순위의 항목이 있으면 1 (부분 분석 4가 우선).
-    if args.fail_on_priority and any(f['priority'] == args.fail_on_priority for f in r['findings']):
+    if args.fail_on_priority and any(f['priority'] == args.fail_on_priority for f in a.official_cards(r['findings'])):
         return 1
     return 0

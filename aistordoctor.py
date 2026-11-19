@@ -18,7 +18,7 @@ import sys
 import time
 import uuid
 
-VERSION = '0.5.4-r1'
+VERSION = '0.5.5-r1'
 SCHEMA_VERSION = '1.2-r1'
 PARSER_VERSION = 'official-markdown-r1-2'
 POLICY_VERSION = 'r1-1'
@@ -208,7 +208,7 @@ def duration_text(seconds):
 # 0.4.1: 보고서에 보이는 영문 코드에 한국어 설명을 붙인다(JSON 값·HTML 필터 값은 그대로).
 LABEL_KO = {
     'unclassified': '미분류', 'assessable': '평가 가능', 'unsupported': '해설 미등록', 'insufficient_data': '자료 부족',
-    'official_import_only': '공식 보고서 결과만 반영(자체 재판정 없음)', 'no_registered_explanation': '이 도구에 등록된 해설 없음',
+    'official_import_only': '공식 보고서 결과만 반영(이 도구가 다시 판정하지 않음)', 'no_registered_explanation': '이 도구에 등록된 해설 없음',
     'error': '오류', 'warning': '경고', 'passed': '통과', 'unspecified': '미지정',
     'unlabelled': '구분 없음', 'info': '정보(Info)', 'resolution': '조치 안내(Resolution)',
     'not_available_in_supported_markdown_contract': '공식 Markdown에 버전 정보가 없음',
@@ -331,19 +331,12 @@ def info_blocks(report):
                        ('같은 수집 실행 증명', '아니오(증명하지 않음)'),
                        ('같은 배포 증명', '아니오(증명하지 않음)')])]
     summary = report.get('analysis_summary') or {}
-    blocks.append(('h', 2, '자체 해설 요약'))
+    blocks.append(('h', 2, '이 도구의 해설 요약'))
     rows = []
-    for key, heading in (('priority_counts', '우선순위'), ('category_counts', '영역'), ('assessment_counts', '평가 범위'),
-                       ('custom_rule_counts', '자체 점검 결과')):
+    # 0.5.5: 자체 점검 결과·규칙표는 보고서에 싣지 않는다(JSON의 내부용 필드로만 남음).
+    for key, heading in (('priority_counts', '우선순위'), ('category_counts', '영역'), ('assessment_counts', '평가 범위')):
         rows += counts_rows(heading, summary.get(key))
     blocks.append(('table', ['구분', '값', '개수'], rows) if rows else ('p', '집계할 항목이 없습니다.'))
-    catalog = summary.get('custom_rule_catalog')
-    if isinstance(catalog, dict) and catalog:
-        # 0.5.2(D1): 통과한 자체 점검은 카드가 없으므로 결과 열로 어느 규칙인지 보인다.
-        results = {c.get('rule_id'): c.get('rule_result') for c in report.get('check_results') or [] if c.get('origin') == 'custom_rule'}
-        blocks.append(('table', ['자체 점검 규칙', '결과', '규칙 버전', '필요 입력', '판정 조건'],
-                       [(rid, result_text(results.get(rid)), c.get('version'), ', '.join(c.get('required_inputs') or []), c.get('condition'))
-                        for rid, c in catalog.items()]))
     blocks += [('h', 2, '입력 버전'),
                ('table', ['구성요소', '값', '사유'],
                 [(name, ', '.join(v['value']) if isinstance(v.get('value'), list) else v.get('value'), label(v.get('reason')))
@@ -1103,14 +1096,30 @@ def evidence_markdown(block):
     return [md_text(block.get('text', '')).replace('\n', '\n\n')]
 
 
+# 0.5.5: 보고서의 판정·숫자는 mc 공식 판정만 쓴다. 이 도구의 자체 점검 판정은 싣지 않는다.
+OFFICIAL_ONLY_NOTE = '판정·숫자는 mc 공식 판정만 표시합니다. 원본 gzip 관측값은 판정 없이 공식 검사의 근거로만 보입니다.'
+
+
+def official_cards(findings):
+    """0.5.5: only official checks become cards. Own-rule records never reach the report, the priority tiles or the exit code."""
+    return [f for f in findings if f.get('origin') != 'custom_rule']
+
+
+def server_observations_markdown(obs):
+    """Per-server raw values attached to an official card (0.5.5, display only, no verdict)."""
+    if not obs or not obs.get('rows'):
+        return []
+    return ['### 서버별 관측값(원본 gzip, 판정 아님)', '', blocks_markdown([('table', obs['headers'], obs['rows'])]), '']
+
+
 def markdown(report, extra_blocks=None):
     out = ['# MinIO AIStor 폐쇄망 진단 보고서', '',
            '도구 버전: ' + md_inline(report['tool_version']) + ' / 스키마: ' + md_inline(report['schema_version']),
            '해설 정책: ' + md_inline(report['policy']['version']) + ' / 환경: ' + md_inline(label(report['policy']['profile'])), '',
            '## 공식 요약', '', '공식 판정(mc 보고서): ' + md_inline(summary_text(report['official_summary'])), '',
            '분석 상태: ' + md_inline(report['run_status']) + ' — ' + STATUS_KO.get(report['run_status'], ''), '',
-           '공식 판정과 이 도구의 자체 점검은 별개입니다. 통과 상세 부재는 정상 검사 복원을 허용하지 않습니다.', '']
-    for f in report['findings']:
+           OFFICIAL_ONLY_NOTE + ' 통과 상세 부재는 정상 검사 복원을 허용하지 않습니다.', '']
+    for f in official_cards(report['findings']):
         out.extend(['## ' + md_inline(f['title']), '',
                     '공식 상태: ' + md_inline(status_text(f)) + '  ',
                     '우선순위: ' + md_inline(priority_text(f['priority'])) + '  ',
@@ -1118,15 +1127,14 @@ def markdown(report, extra_blocks=None):
                     md_text(f['observed']), '', md_text(f['recommendation']), '', md_text(f['impact']), '',
                     '변경 승인: ' + APPROVAL_KO[f['approval_required']], '',
                     *resolution_ko_markdown(f.get('resolution_ko')),
+                    *server_observations_markdown(f.get('server_observations')),
                     '### 재확인 절차', '', *['- ' + md_inline(step) for step in f['verification_steps']], '',
-                    '### 관측값(원본 gzip)' if f.get('origin') == 'custom_rule' and not f['evidence_blocks'] else '### 원본 근거(마스킹)', ''])
+                    '### 원본 근거(마스킹)', ''])
         for block in f['evidence_blocks']:
             out.append('근거 구간: ' + md_inline(label(block['section'])) + ' / 줄 ' + str(block['source_locator']['line']))
             out.extend([''] + evidence_markdown(block))
             out.append('')
-        if not f['evidence_blocks'] and f.get('origin') == 'custom_rule':
-            out.extend([*['- ' + md_inline(v) for v in f.get('observed_values') or ['관측값 없음']], ''])
-        elif not f['evidence_blocks']:
+        if not f['evidence_blocks']:
             out.extend([md_text(f['detail']).replace('\n', '\n\n'), ''])
     out.append(blocks_markdown((extra_blocks or []) + info_blocks(report)))
     return '\n'.join(out)
@@ -1137,35 +1145,13 @@ def markdown(report, extra_blocks=None):
 # 외부 자원 없이 인라인 CSS/SVG와 약간의 순수 JS만 쓰며, JS가 꺼져도 모든 내용이 보인다.
 SEVERITY_UI = {'error': ('✖', '오류'), 'warning': ('▲', '경고'), 'passed': ('✔', '통과'), 'unknown': ('?', '미평가'), 'info': ('ⓘ', '정보')}
 SEVERITY_ORDER = {'error': 0, 'warning': 1, 'unknown': 2, 'info': 3, 'passed': 4}
-# 0.5.3: 같은 설정을 다룬 자체 점검은 공식 카드 안의 보조 정보로 합친다(공식 결과가 있을 때만).
-OWN_OFFICIAL = {'r2.thp.mode': 'sys.mem.thp', 'r2.iommu.consistency': 'sys.mem.iommu'}
-OWN_UI = {'error': '자체 실패', 'warning': '자체 경고', 'unknown': '자체 미평가', 'info': '자체 정보', 'passed': '자체 통과'}
 PRIORITY_ORDER = {'P1': 0, 'P2': 1, 'P3': 2, 'P4': 3}
 
 
 def severity(finding):
-    """Display bucket only: official status for imported checks, own result for custom rules."""
-    if finding.get('origin') == 'custom_rule':
-        return {'fail': 'error', 'warning': 'warning', 'pass': 'passed', 'info': 'info'}.get(finding.get('rule_result'), 'unknown')
+    """Display bucket of an official card (0.5.5: cards are official checks only)."""
     status = finding.get('official_status')
     return status if status in ('error', 'warning', 'passed') else 'unknown'
-
-
-def card_key(finding):
-    """Filter key of a card: official severity as is, own results prefixed so they never add to official counts."""
-    return ('own-' if finding.get('origin') == 'custom_rule' else '') + severity(finding)
-
-
-def card_groups(findings):
-    """[(card finding, attached own findings)]. Own THP/IOMMU results join the open official card of the same setting."""
-    hosts = {f.get('source_check_id'): f for f in findings
-             if f.get('origin') != 'custom_rule' and f.get('source_check_id') and severity(f) != 'passed'}
-    host_of = lambda f: hosts.get(OWN_OFFICIAL.get(f.get('rule_id'))) if f.get('origin') == 'custom_rule' else None
-    attached = {}
-    for f in findings:
-        if host_of(f) is not None:
-            attached.setdefault(id(host_of(f)), []).append(f)
-    return [(f, attached.get(id(f), [])) for f in findings if host_of(f) is None]
 
 
 def badge(sev, text=None, cls='sev'):
@@ -1191,9 +1177,8 @@ def tile(sev, name, value, sub=''):
 
 
 # 0.5.2(B1): 우선순위 산정 기준 설명(규칙 자체는 그대로).
-PRIORITY_BASIS = ('<p class="note">산정 기준: 카드 1장을 1건으로 셉니다. 공식 검사는 이 도구에 등록된 검사별 고정값(등록되지 않은 검사는 미분류), '
-                  '자체 점검만 있는 카드는 경고·실패이면 P2, 미평가이면 미분류입니다. 같은 설정을 다룬 공식 검사와 자체 점검(THP·IOMMU)은 '
-                  '카드 1장으로 합쳐 공식 검사의 우선순위로 한 번만 셉니다. 정보 등급(수집 오류 기록)은 우선순위에서 제외합니다.</p>')
+PRIORITY_BASIS = ('<p class="note">산정 기준: 공식 검사 카드 1장을 1건으로 셉니다. 검사별로 이 도구에 등록된 고정값이며 '
+                  '등록되지 않은 검사는 미분류입니다. 원본 gzip 관측값은 우선순위에 넣지 않습니다.</p>')
 
 
 def conclusion_text(report):
@@ -1203,16 +1188,10 @@ def conclusion_text(report):
     if isinstance(summary, dict):
         parts.append('공식 검사(mc) 오류 %s건·경고 %s건' % (summary.get('errors'), summary.get('warnings')))
         issues += sum(v for k, v in summary.items() if k in ('errors', 'warnings') and isinstance(v, int))
-    custom = (report.get('analysis_summary') or {}).get('custom_rule_counts')
-    if isinstance(custom, dict):
-        parts.append('자체 점검 실패 %s건·경고 %s건·미평가 %s건%s' % (custom.get('fail', 0), custom.get('warning', 0), custom.get('not_evaluated', 0),
-                                                         '·정보 %s건' % custom['info'] if custom.get('info') else ''))
-        issues += sum(custom.get(k, 0) for k in ('fail', 'warning', 'not_evaluated'))
-    head = ', '.join(parts) or '판정 자료 없음'
-    # 0.5.2(D7): 오류·실패가 있으면 그것부터 보라고 덧붙인다(집계는 그대로).
-    urgent = (summary.get('errors') if isinstance(summary, dict) and isinstance(summary.get('errors'), int) else 0) + \
-        (custom.get('fail', 0) if isinstance(custom, dict) else 0)
-    verdict = ('이 있어 확인이 필요합니다(오류·실패 먼저).' if urgent else '이 있어 확인이 필요합니다.') if issues else '으로, 보고된 오류·경고는 없습니다.'
+    head = ', '.join(parts) or '공식 판정 자료 없음'
+    # 0.5.2(D7): 오류가 있으면 그것부터 보라고 덧붙인다. 0.5.5: 공식 판정만 센다.
+    urgent = summary.get('errors') if isinstance(summary, dict) and isinstance(summary.get('errors'), int) else 0
+    verdict = ('이 있어 확인이 필요합니다(오류 먼저).' if urgent else '이 있어 확인이 필요합니다.') if issues else ('으로, 보고된 오류·경고는 없습니다.' if parts else '입니다.')
     return head + verdict + ' 수집 시점의 기록을 분석한 결과이며 현재 서비스 상태를 확정하지 않습니다.'
 
 
@@ -1228,19 +1207,10 @@ def dashboard_html(report, extra=''):
             '공식 판정(mc 보고서) ' + summary_text(summary)))
     else:
         blocks.append('<div class="panel"><h3>공식 판정 (mc 보고서)</h3><p class="note">%s</p></div>' % esc(summary_text(summary)))
-    custom = (report.get('analysis_summary') or {}).get('custom_rule_counts')
-    if isinstance(custom, dict):
-        blocks.append('<div class="panel"><h3>자체 점검 결과 (이 도구, 공식 판정 숫자에 더하지 않음)</h3><div class="tiles">%s%s%s%s%s</div>%s</div>' % (
-            tile('passed', '통과', custom.get('pass', 0)), tile('error', '실패', custom.get('fail', 0)),
-            tile('warning', '경고', custom.get('warning', 0)), tile('unknown', '미평가', custom.get('not_evaluated', 0)),
-            tile('info', '정보', custom.get('info', 0)),
-            stack_bar([('passed', custom.get('pass', 0), '통과'), ('error', custom.get('fail', 0), '실패'),
-                       ('warning', custom.get('warning', 0), '경고'), ('unknown', custom.get('not_evaluated', 0), '미평가'),
-                       ('info', custom.get('info', 0), '정보')], '자체 점검 결과 비율')))
-    # 0.5.3: 우선순위는 카드 기준(합쳐진 자체 점검은 공식 카드 1건), 통과·정보는 제외.
-    open_cards = [f for f, _ in card_groups(findings) if severity(f) not in ('passed', 'info')]
+    # 0.5.5: 자체 점검 결과 타일은 없다. 우선순위는 공식 카드(통과 제외)만 센다.
+    open_cards = [f for f in official_cards(findings) if severity(f) != 'passed']
     priorities = Counter(f.get('priority') for f in open_cards)
-    blocks.append('<div class="panel"><h3>해설 우선순위 (카드 기준, 통과·정보 제외, 이 도구 기준·공식 심각도 아님)</h3><div class="tiles prio">%s</div>%s</div>' % (''.join(
+    blocks.append('<div class="panel"><h3>해설 우선순위 (공식 카드 기준, 통과 제외, 이 도구 기준·공식 심각도 아님)</h3><div class="tiles prio">%s</div>%s</div>' % (''.join(
         '<div class="tile tone-p%s"><div class="tile-k">%s</div><div class="tile-v">%d</div></div>' % (
             key[-1] if key in PRIORITY_ORDER else 'u', esc(key if key in PRIORITY_ORDER else '미분류'), priorities.get(key, 0))
         for key in ('P1', 'P2', 'P3', 'P4', 'unclassified')), PRIORITY_BASIS))
@@ -1263,26 +1233,21 @@ def evidence_html(blocks):
 STANDARD_IMPACT = frozenset(('실제 서비스 영향은 이 보고서만으로 확정하지 않습니다.', '현재 서비스 상태·데이터 안전성·원인을 확정하지 않습니다.'))
 
 
-def own_aux_box(g):
-    """Own result shown inside the official card of the same setting (0.5.3). Not counted with official results."""
-    values = g.get('observed_values') or []
-    return ('<div class="box own-verdict own-aux"><h4>%s 자체 점검 보조 정보: %s <small>(이 도구, 공식 판정·공식 숫자와 별개)</small></h4>'
-            '<p>%s</p>%s<p class="muted">판정 조건: %s</p></div>') % (
-        badge(severity(g), '자체 결과: ' + result_text(g.get('rule_result'))), esc(g['title']), esc(plain(g['observed'])),
-        '<p class="muted">관측값(원본 gzip)</p><ul class="obs">%s</ul>' % ''.join('<li>%s</li>' % esc(v) for v in values) if values else '',
-        esc(g.get('detail') or ''))
+def server_observations_html(obs):
+    """0.5.5: per-server raw values (gzip) under an official card. Facts only: no badge, no own verdict, no rule text."""
+    if not obs or not obs.get('rows'):
+        return ''
+    head = ''.join('<th scope="col">%s</th>' % esc(h) for h in obs['headers'])
+    rows = ''.join('<tr><th scope="row">%s</th>%s</tr>' % (esc(r[0]), ''.join('<td>%s</td>' % esc(MISSING if v is None else v) for v in r[1:]))
+                   for r in obs['rows'])
+    return ('<div class="box obs-box"><h4>서버별 관측값(원본 gzip) <small>(판정 아님, 수집 시점 값)</small></h4>'
+            '<div class="table-scroll"><table class="obs"><thead><tr>%s</tr></thead><tbody>%s</tbody></table></div></div>') % (head, rows)
 
 
-def finding_card(f, attached=()):
+def finding_card(f):
     sev = severity(f)
-    custom = f.get('origin') == 'custom_rule'
-    if custom:
-        verdict = ('<div class="box own-verdict"><h4>%s 자체 점검 판정 <small>(이 도구, 공식 판정 아님)</small></h4><p>%s</p>'
-                   '<p class="muted">판정 조건: %s</p></div>') % (
-            badge(sev, '자체 결과: ' + result_text(f.get('rule_result'))), esc(plain(f['observed'])), esc(f.get('detail') or ''))
-    else:
-        verdict = '<div class="box official"><h4>%s 공식 판정 <small>(mc 보고서)</small></h4><p>%s</p></div>' % (
-            badge(sev, '공식: ' + plain(status_text(f))), esc(f['observed']))
+    verdict = '<div class="box official"><h4>%s 공식 판정 <small>(mc 보고서)</small></h4><p>%s</p></div>' % (
+        badge(sev, '공식: ' + plain(status_text(f))), esc(f['observed']))
     steps = ''.join('<li>%s</li>' % esc(step) for step in f['verification_steps'])
     resolution = [b for b in f['evidence_blocks'] if b.get('section') == 'resolution']
     other = [b for b in f['evidence_blocks'] if b.get('section') != 'resolution']
@@ -1290,27 +1255,18 @@ def finding_card(f, attached=()):
     if resolution:
         # 0.5.4: 한글 해결방안을 위에 두고 영문 원문은 접어서 남긴다(인쇄 시에는 펼쳐진다).
         evidence += '<details class="res-en"><summary>공식 조치 안내(Resolution, 마스킹, 영문 원문)</summary>%s</details>' % evidence_html(resolution)
-    if custom and not f['evidence_blocks']:
-        # 0.5.2(C3): 자체 점검은 판정 조건을 근거처럼 다시 싣지 않고, 원본 gzip의 서버별 관측값을 보인다.
-        values = f.get('observed_values') or []
-        if values:
-            evidence += '<details><summary>관측값(원본 gzip)</summary><ul>%s</ul></details>' % ''.join('<li>%s</li>' % esc(v) for v in values)
-    elif other or not f['evidence_blocks']:
+    if other or not f['evidence_blocks']:
         evidence += '<details><summary>마스킹된 근거</summary>%s</details>' % (evidence_html(other) or '<pre>%s</pre>' % esc(f['detail']))
-    if sev == 'info':
-        meta = '<span class="chip">우선순위 해당 없음(정보)</span><span class="chip">영역 %s</span>' % esc(f['category'])
-    else:
-        meta = '<span class="chip">우선순위 %s</span><span class="chip">영역 %s</span>' % (esc(plain(priority_text(f['priority']))), esc(f['category']))
-    if not custom:
-        verdict += resolution_ko_html(f.get('resolution_ko'))
-    verdict += ''.join(own_aux_box(g) for g in attached)
+    meta = '<span class="chip">우선순위 %s</span><span class="chip">영역 %s</span>' % (esc(plain(priority_text(f['priority']))), esc(f['category']))
+    # 0.5.4 한글 해결방안, 0.5.5 서버별 관측값(판정 없음)을 공식 판정 아래에 둔다.
+    verdict += resolution_ko_html(f.get('resolution_ko')) + server_observations_html(f.get('server_observations'))
     # 0.5.2(C1): 카드마다 같은 표준 면책 문장은 생략하고 검사 결과 머리말에 한 번만 둔다(JSON·Markdown은 그대로).
     impact = '' if f['impact'] in STANDARD_IMPACT else '<p>%s</p>' % esc(f['impact'])
     return ('<article class="card sev-%s" data-sev="%s" data-status="%s" data-priority="%s" data-category="%s">'
             '<header class="card-h">%s<h3>%s</h3><div class="chips">%s</div></header>%s'
             '<div class="box ours"><h4>이 도구의 해설 <small>(공식 판정과 별개)</small></h4><p>%s</p>%s'
             '<p class="muted">평가 범위: <span title="%s">%s</span> / 변경 승인: %s</p></div>%s%s</article>') % (
-        sev, card_key(f), esc(f['official_status']), 'none' if sev == 'info' else esc(f['priority']), esc(f['category']),
+        sev, sev, esc(f['official_status']), esc(f['priority']), esc(f['category']),
         badge(sev), esc(f['title']), meta, verdict, esc(f['recommendation']), impact,
         esc('%s / %s' % (f.get('assessment'), f.get('assessment_reason'))), esc(plain(assessment_text(f))), esc(APPROVAL_KO[f['approval_required']]),
         '<div class="box steps"><h4>조치·재확인 절차</h4><ol>%s</ol></div>' % steps if steps else '', evidence)
@@ -1346,7 +1302,7 @@ h3{font-size:16px;margin:0 0 8px}h4{font-size:14px;margin:0 0 6px}small,.muted,.
 .prio .tile{background:var(--card)}
 .stack{display:flex;height:12px;border-radius:6px;overflow:hidden;margin-top:10px;background:var(--bar)}
 .seg.sev-info{background:var(--accent)}.badge.sev-info{color:var(--accent);background:var(--unknown-bg)}.card.sev-info{border-left-color:var(--accent)}
-.own-aux{background:var(--card)}.obs{margin:4px 0;padding-left:22px;font-size:14px}.counts{font-size:14px;margin:0 0 10px}
+.obs-box{background:var(--card)}table.obs{font-size:13px;margin:4px 0}.counts{font-size:14px;margin:0 0 10px}
 .seg.sev-error{background:var(--error)}.seg.sev-warning{background:var(--warning)}.seg.sev-passed{background:var(--passed)}.seg.sev-unknown{background:var(--unknown)}
 .badge{display:inline-flex;align-items:center;gap:4px;font-size:12px;font-weight:700;padding:2px 8px;border-radius:999px;border:1px solid currentColor;white-space:nowrap}
 .sev-error.badge,.badge.sev-error{color:var(--error);background:var(--error-bg)}.badge.sev-warning{color:var(--warning);background:var(--warning-bg)}
@@ -1356,7 +1312,7 @@ h3{font-size:16px;margin:0 0 8px}h4{font-size:14px;margin:0 0 6px}small,.muted,.
 .card.sev-error{border-left-color:var(--error)}.card.sev-warning{border-left-color:var(--warning)}.card.sev-passed{border-left-color:var(--passed)}
 .card-h{display:flex;flex-wrap:wrap;align-items:center;gap:8px 10px;margin-bottom:10px}.card-h h3{margin:0;flex:1 1 260px}
 .box{border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin:8px 0}.box p{margin:4px 0}
-.box.official{background:var(--bar)}.box.own-verdict{border-style:dashed}.box.ko-res{border-left:4px solid var(--accent)}.box.ko-res.missing{border-left-color:var(--unknown)}.box.ko-res pre{white-space:pre-wrap}.steps ol{margin:4px 0;padding-left:22px}
+.box.official{background:var(--bar)}.box.ko-res{border-left:4px solid var(--accent)}.box.ko-res.missing{border-left-color:var(--unknown)}.box.ko-res pre{white-space:pre-wrap}.steps ol{margin:4px 0;padding-left:22px}
 details{margin:8px 0}summary{cursor:pointer;font-weight:600}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:var(--bar);padding:8px;border-radius:6px}
 .loc{font-size:12px;color:var(--muted);margin:6px 0 2px}
 .table-scroll{overflow-x:auto}table{border-collapse:collapse;font-size:14px}th,td{border:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top}
@@ -1392,53 +1348,41 @@ R1_CATEGORIES = ('가용성', '설정', '보안', '미분류')
 
 
 def filters_html(cards_sev, status_options=(), categories=R1_CATEGORIES):
-    # 0.5.3: 공식 버튼은 공식 카드만 센다(mc 보고서 숫자와 같은 기준). 자체 점검만 있는 카드는 '자체 …' 버튼으로 따로 센다.
+    # 0.5.3: 공식 버튼은 공식 카드만 센다(mc 보고서 숫자와 같은 기준). 0.5.5: 자체 점검 버튼은 없다.
     counts = Counter(cards_sev)
     buttons = ['<button type="button" data-sev="" aria-pressed="true">목록 전체 %d</button>' % len(cards_sev)]
     for sev in ('error', 'warning', 'passed', 'unknown'):
         if sev != 'unknown' or counts.get('unknown'):
             icon, word = SEVERITY_UI[sev]
             # 0.5.2(D2): 통과 카드가 없으면 대시보드의 통과 수와 어긋나 보이지 않게 이유를 붙인다.
-            note = ' (공식 통과 상세는 원본에 없음, 자체 통과는 부록 규칙표)' if sev == 'passed' and not counts.get(sev) else ''
+            note = ' (공식 통과 상세는 원본에 없음)' if sev == 'passed' and not counts.get(sev) else ''
             buttons.append('<button type="button" data-sev="%s" aria-pressed="false"><span aria-hidden="true">%s</span> 공식 %s %d%s</button>' % (sev, icon, word, counts.get(sev, 0), note))
-    for sev in ('error', 'warning', 'unknown', 'info'):
-        if counts.get('own-' + sev):
-            buttons.append('<button type="button" data-sev="own-%s" aria-pressed="false"><span aria-hidden="true">%s</span> %s %d</button>' % (
-                sev, SEVERITY_UI[sev][0], OWN_UI[sev], counts['own-' + sev]))
     extra = ''.join('<option value="%s">%s</option>' % (esc(value), esc(text)) for value, text in status_options)
     return ('<div class="filters" id="filters" hidden><div class="sevbtns" role="group" aria-label="심각도">%s</div>'
             '<label>검색 <input id="q" type="search"></label>'
-            '<label>공식/자체 결과 <select id="s"><option value="">전체</option><option value="error">오류 (error)</option><option value="warning">경고 (warning)</option><option value="passed">통과 (passed)</option>%s</select></label>'
+            '<label>공식 결과 <select id="s"><option value="">전체</option><option value="error">오류 (error)</option><option value="warning">경고 (warning)</option><option value="passed">통과 (passed)</option>%s</select></label>'
             '<label>우선순위 <select id="p"><option value="">전체</option><option>P1</option><option>P2</option><option>P3</option><option>P4</option><option value="unclassified">미분류 (unclassified)</option></select></label>'
             '<label>영역 <select id="c"><option value="">전체</option>%s</select></label><span id="shown" aria-live="polite"></span></div>') % (
         ''.join(buttons), extra, ''.join('<option>%s</option>' % esc(c) for c in categories))
 
 
-def counts_html(report, groups):
-    """Always visible (JS off too): official card counts next to the mc summary, own results counted apart."""
-    keys = Counter(card_key(f) for f, _ in groups)
+def counts_html(report, cards):
+    """Always visible (JS off too): official card counts next to the mc summary (0.5.5: official only)."""
+    keys = Counter(severity(f) for f in cards)
     summary = report.get('official_summary')
     official = '공식 판정 카드: 오류 %d · 경고 %d' % (keys.get('error', 0), keys.get('warning', 0))
     if isinstance(summary, dict):
         official += ' (mc 보고서 요약: 통과 %s · 오류 %s · 경고 %s)' % (summary.get('passed'), summary.get('errors'), summary.get('warnings'))
-    custom = (report.get('analysis_summary') or {}).get('custom_rule_counts')
-    own = ''
-    if isinstance(custom, dict):
-        merged = sorted({g['title'] for _, attached in groups for g in attached})
-        own = ('<br>자체 점검(이 도구, 공식 숫자에 더하지 않음): 통과 %d · 실패 %d · 경고 %d · 미평가 %d · 정보 %d.%s') % (
-            custom.get('pass', 0), custom.get('fail', 0), custom.get('warning', 0), custom.get('not_evaluated', 0), custom.get('info', 0),
-            esc(' 같은 설정의 자체 결과(%s)는 해당 공식 카드 안에 보조 정보로 표시합니다.' % ', '.join(merged)) if merged else '')
-    return '<p class="counts">%s%s</p>' % (esc(official), own)
+    return '<p class="counts">%s</p>' % esc(official)
 
 
 def html_page(report, *, sections=(), dashboard_extra='', status_options=(), categories=R1_CATEGORIES, before_appendix=()):
     """Single self-contained page: dashboard, optional visual sections, check cards, collapsed appendix."""
-    groups = sorted(card_groups(report['findings']), key=lambda g: (g[0].get('origin') == 'custom_rule', SEVERITY_ORDER[severity(g[0])],
-                                                                     PRIORITY_ORDER.get(g[0].get('priority'), 9)))
-    cards = ''.join(finding_card(f, attached) for f, attached in groups)
+    shown = sorted(official_cards(report['findings']), key=lambda f: (SEVERITY_ORDER[severity(f)], PRIORITY_ORDER.get(f.get('priority'), 9)))
+    cards = ''.join(finding_card(f) for f in shown)
     checks = ('<section id="checks" aria-labelledby="checks-h"><h2 id="checks-h">검사 결과 (오류·경고 우선)</h2>'
-              '<p class="note">공식 판정과 이 도구의 자체 점검은 별개입니다. 통과 상세는 복원하지 않습니다. 모든 해설은 수집 시점 기록에 근거하며 현재 서비스 상태·실제 영향·원인을 확정하지 않습니다(카드마다 반복하지 않음).</p>'
-              '%s%s%s</section>') % (counts_html(report, groups), filters_html([card_key(f) for f, _ in groups], status_options, categories),
+              '<p class="note">%s 통과 상세는 복원하지 않습니다. 모든 해설은 수집 시점 기록에 근거하며 현재 서비스 상태·실제 영향·원인을 확정하지 않습니다(카드마다 반복하지 않음).</p>'
+              '%s%s%s</section>') % (esc(OFFICIAL_ONLY_NOTE), counts_html(report, shown), filters_html([severity(f) for f in shown], status_options, categories),
                                      cards or '<p>표시할 검사 상세가 없습니다.</p>')
     appendix = ('<section id="appendix"><details class="appendix"><summary>부록: 확인된 정보·입력 결합·한계</summary>%s</details></section>'
                 % blocks_html(info_blocks(report)))
@@ -1587,12 +1531,8 @@ def save(report, out_dir, force=False, *, renderers=None):
 
 
 def result_summary_line(report):
-    custom = (report.get('analysis_summary') or {}).get('custom_rule_counts')
-    line = '요약: 공식 판정 ' + summary_text(report.get('official_summary'))
-    if isinstance(custom, dict):
-        names = {'pass': '통과', 'warning': '경고', 'not_evaluated': '미평가', 'info': '정보'}
-        line += ' / 자체 점검 ' + ' · '.join('%s %s' % (names.get(k, k), v) for k, v in sorted(custom.items(), key=lambda kv: (list(names).index(kv[0]) if kv[0] in names else 9, str(kv[0]))))
-    return line + ' / 분석 상태 ' + str(report.get('run_status'))
+    # 0.5.5: 실행 끝 요약도 공식 판정만 보인다.
+    return '요약: 공식 판정 ' + summary_text(report.get('official_summary')) + ' / 분석 상태 ' + str(report.get('run_status'))
 
 
 def main(argv=None, *, default_out_dir=None):
@@ -1647,6 +1587,6 @@ def main(argv=None, *, default_out_dir=None):
         print(json.dumps({'official_summary': report['official_summary'], 'run_status': report['run_status'], 'coverage': report['coverage']}, ensure_ascii=False))
     if partial:
         return 4
-    if args.fail_on_priority and any(f['priority'] == args.fail_on_priority for f in report['findings']):
+    if args.fail_on_priority and any(f['priority'] == args.fail_on_priority for f in official_cards(report['findings'])):
         return 1
     return 0

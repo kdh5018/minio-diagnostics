@@ -603,7 +603,7 @@ class Fix041Tests(unittest.TestCase):
         self.assertIn('data-priority="unclassified"', rendered)
         self.assertIn('<option value="error">오류 (error)</option>', rendered)
         known = a.model(SYNTHETIC.replace('unknown.check', 'sys.mem.iommu'))
-        self.assertIn('평가 가능 (assessable) / 공식 보고서 결과만 반영(자체 재판정 없음) (official_import_only)', a.markdown(known))
+        self.assertIn('평가 가능 (assessable) / 공식 보고서 결과만 반영(이 도구가 다시 판정하지 않음) (official_import_only)', a.markdown(known))
 
     def test_certificate_time_shows_collection_and_render_basis(self):
         report = a.model(TLS_MD)

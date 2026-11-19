@@ -245,8 +245,8 @@ class R2Tests(unittest.TestCase):
         r = h.report(body)
         rendered = h.html_report(r)
         self.assertIn('<option>용량</option>', rendered)
-        # 0.4.1 의도된 변경: 필터 값은 그대로, 보이는 글자는 한국어(fail → 실패).
-        self.assertIn('<option value="해당 없음 / 자체 결과: fail">해당 없음 / 자체 결과: 실패</option>', rendered)
+        # 0.5.5 의도된 변경: 자체 점검 카드가 없으므로 자체 결과 필터 값도 없다.
+        self.assertNotIn('자체 결과', rendered)
         self.assertTrue(all(c['official_status'] is None for c in r['check_results']))
         self.assertIn('raw source counters', r['facts']['health']['capacity_unit'])
 
@@ -287,7 +287,7 @@ class R2Tests(unittest.TestCase):
         before = copy.deepcopy(report)
         rendered = h.html_report(report)
         self.assertEqual(report, before)
-        for label in ('원본 관측 정보', '서버 기록', '드라이브 기록', '원본 수집 오류', '수집 범위·미지원·결합 제한'):
+        for label in ('원본 관측 정보', '서버 기록', '드라이브 기록', '수집되지 않은 항목', '수집 범위·미지원·결합 제한'):
             self.assertIn(label, rendered)
         self.assertEqual(rendered.count('<article '), len(report['findings']))
 
@@ -359,7 +359,7 @@ class R2Tests(unittest.TestCase):
             self.assertIn('통과 0 · 오류 1 · 경고 0 (총 1)', text)
             self.assertIn('원본 관측 정보', text)
             self.assertIn('입력 결합 확인', text)
-            self.assertIn('자체 점검 결과', text)
+            self.assertNotIn('자체 점검 결과', text)  # 0.5.5: 자체 판정 표시 없음
         self.assertNotIn('<pre>{', rendered)
         self.assertIn('| 항목 | 값 |', md)
         self.assertIn('| 수집 영역 | 제공 기록 수 | 오류 기록 행 수 | 입력 지원 상태 | 원본 JSON 위치 |', md)
@@ -425,7 +425,7 @@ class R2Tests(unittest.TestCase):
         health = work / 'h.json.gz'
         health.write_bytes(packed(SYNTHETIC))
         rc, out, err = self.run_main('--health', str(health), '--out-dir', str(work / 'o1'), '--lang', 'ko', '--mask', 'basic', '--fail-on-priority', 'P2')
-        self.assertEqual(rc, 1, err)
+        self.assertEqual(rc, 0, err)  # 0.5.5: 공식 카드만 셈 — gzip 단독은 공식 카드 0장
         self.assertIn('요약: 공식 판정 공식 Markdown 미지정', out)
         current = json.loads((work / 'o1/CURRENT.json').read_text())
         saved = json.loads((work / 'o1' / current['generation'] / 'aistor-diag-report.json').read_text())
@@ -499,13 +499,14 @@ class R2Tests(unittest.TestCase):
         body = copy.deepcopy(SYNTHETIC)
         body['sys']['config'][0]['config']['proc-cmdline'] = []
         r = h.report(body, 1, PAIRED_MD)
-        iommu = next(f for f in r['findings'] if f['id'] == 'r2.iommu.consistency')
-        self.assertIsNone(iommu['rule_result'])
+        iommu = next(c for c in r['check_results'] if c.get('rule_id') == 'r2.iommu.consistency')
+        self.assertIsNone(iommu['rule_result'])  # 내부 JSON에는 남는다
+        self.assertFalse(any(f['id'] == 'r2.iommu.consistency' for f in r['findings']))
         md, rendered = h.markdown_report(r), h.html_report(r)
-        for text in (md, rendered, iommu['observed']):
+        for text in (md, rendered):
             self.assertNotIn('None', text)
-            self.assertIn('자체 점검 결과: 미평가 / 부팅 옵션(proc-cmdline)은 수집됐으나 iommu·intel_iommu·amd_iommu 옵션이 없음', text)
-        self.assertIn('공식 상태: 해당 없음 / 자체 결과: 미평가', md)
+            self.assertNotIn('자체 점검 결과', text)
+            self.assertNotIn('자체 결과', text)
 
     def test_r2_markdown_has_no_entities_and_filters_keep_values(self):
         body = copy.deepcopy(SYNTHETIC)
@@ -514,9 +515,9 @@ class R2Tests(unittest.TestCase):
         md, rendered = h.markdown_report(r), h.html_report(r)
         for entity in ('&lt;', '&gt;', '&quot;', '&#'):
             self.assertNotIn(entity, md)
-        self.assertIn('<option value="해당 없음 / 자체 결과: fail">해당 없음 / 자체 결과: 실패</option>', rendered)
-        self.assertIn('data-status="해당 없음 / 자체 결과: fail"', rendered)
-        self.assertIn('자체 점검 결과: 실패 / 제공된 용량 카운터 범위만 확인 (provided_counter_bounds_only)', md)
+        self.assertNotIn('자체 결과', rendered)  # 0.5.5: 자체 카드·필터 없음
+        self.assertNotIn('자체 점검 결과', md)
+        self.assertIn('data-status="error"', rendered)  # 공식 카드 필터 값은 유지
         self.assertNotIn('secret.internal', md + rendered)
 
     def test_real_combined_readable_when_fixture_present(self):
@@ -779,31 +780,33 @@ class Html050Tests(unittest.TestCase):
 
     def test_collection_errors_chart_and_heatmap(self):
         page = self.page
-        self.assertIn('✖ 오류 행 3 / 기록 3', page)
-        self.assertIn('✖ 오류 행 2 / 기록 3', page)
+        self.assertIn('오류 기록 행 3 / 기록 3', page)  # 0.5.5: 판정 기호 없음
+        self.assertIn('오류 기록 행 2 / 기록 3', page)
+        self.assertNotIn('✖ 오류 행', page)
         self.assertIn('<th scope="row">CPU 주파수 정책(cpufreq/scaling_governor)</th><td class="heat h4">3</td>', page)
         self.assertIn('<table class="heatmap">', page)
         self.assertNotIn('canary', page)
 
     def test_cards_separate_official_and_own_commentary(self):
         page = self.page
-        groups = a.card_groups(self.r['findings'])
-        self.assertEqual(page.count('<article '), len(groups))
+        cards = a.official_cards(self.r['findings'])
+        self.assertEqual(page.count('<article '), len(cards))
+        self.assertTrue(all(f.get('origin') != 'custom_rule' for f in cards))
         self.assertIn('공식 판정 <small>(mc 보고서)</small>', page)
-        self.assertIn('자체 점검 판정 <small>(이 도구, 공식 판정 아님)</small>', page)
-        self.assertIn('이 도구의 해설 <small>(공식 판정과 별개)</small>', page)
-        sev = re.findall(r'<article class="card sev-(\w+)" data-sev="(own-)?\1"', page)
-        self.assertEqual(len(sev), len(groups))
+        self.assertNotIn('자체 점검 판정', page)  # 0.5.5: 자체 판정 블록 없음
+        self.assertNotIn('data-sev="own-', page)
+        sev = re.findall(r'<article class="card sev-(\w+)" data-sev="\1"', page)
+        self.assertEqual(len(sev), len(cards))
         order = {'error': 0, 'warning': 1, 'unknown': 2, 'info': 3, 'passed': 4}
-        keys = [(bool(own), order[s]) for s, own in sev]
-        self.assertEqual(keys, sorted(keys))  # 공식 카드 먼저, 각각 오류·경고 우선
+        keys = [order[s] for s in sev]
+        self.assertEqual(keys, sorted(keys))  # 오류·경고 우선
 
     def test_works_without_js_and_expands_for_print(self):
         page = self.page
         self.assertIn('<div class="filters" id="filters" hidden>', page)  # JS가 없으면 동작하지 않는 필터는 숨김
         for label in ('전체 ', '오류 ', '경고 ', '통과 '):
             self.assertIn(label, re.search(r'<div class="sevbtns".*?</div>', page).group(0))
-        for section in ('dashboard', 'topology', 'config', 'collection', 'checks', 'raw', 'appendix'):
+        for section in ('dashboard', 'topology', 'config', 'uncollected', 'checks', 'raw', 'appendix'):
             self.assertIn('<a href="#%s">' % section, page)
             self.assertIn('id="%s"' % section, page)
         self.assertIn('<details class="appendix"><summary>부록: 확인된 정보·입력 결합·한계</summary>', page)
@@ -933,7 +936,7 @@ class Review054Tests(unittest.TestCase):
         self.assertEqual(self.r['official_summary'], {'passed': 32, 'errors': 2, 'warnings': 1})
         self.assertEqual((b['error'], b['warning']), (2, 1))
         self.assertEqual(len(re.findall(r'data-sev="warning"', self.page)), 2)  # 상자는 data-sev를 늘리지 않음
-        self.assertEqual(len(self.cards), 4)
+        self.assertEqual(len(self.cards), 3)  # 0.5.5: 공식 카드 3장만
 
     def test_korean_box_on_error_and_warning_cards_after_official_verdict(self):
         for cid in ('minio.cluster.min', 'sys.mem.iommu', 'sys.mem.thp'):
@@ -943,19 +946,19 @@ class Review054Tests(unittest.TestCase):
             self.assertEqual(card.count('해결방안(한글)'), 1)
             self.assertLess(card.index('공식 판정 <small>'), card.index('해결방안(한글)'))
             self.assertLess(card.index('해결방안(한글)'), card.index('이 도구의 해설'))
-        iommu = next(c for c in self.cards if '자체 점검 보조 정보: 명시적 IOMMU' in c)
+        iommu = next(c for c in self.cards if '명시적 IOMMU 부팅 옵션' in c)
         self.assertIn('grubby --update-kernel=ALL --args=&quot;iommu=pt&quot;', iommu)
         self.assertIn('cat /proc/cmdline', iommu)
-        self.assertLess(iommu.index('해결방안(한글)'), iommu.index('자체 점검 보조 정보'))
-        thp = next(c for c in self.cards if '자체 점검 보조 정보: THP' in c)
+        self.assertLess(iommu.index('해결방안(한글)'), iommu.index('서버별 관측값(원본 gzip)'))
+        thp = next(c for c in self.cards if '<th scope="col">THP enabled</th>' in c)
         self.assertIn('일시 적용', thp)
         self.assertIn('영구 적용', thp)
         self.assertIn('tuned-adm profile minio-thp', thp)
-        own = next(c for c in self.cards if '설정 변경 대상이 아니라' in c)
-        self.assertNotIn('해결방안(한글)', own)  # 자체 점검 카드에는 붙이지 않음
+        self.assertLess(thp.index('해결방안(한글)'), thp.index('서버별 관측값(원본 gzip)'))
+        self.assertFalse(any('설정 변경 대상이 아니라' in c for c in self.cards))  # 자체 전용 카드 없음
 
     def test_english_resolution_collapsed(self):
-        thp = next(c for c in self.cards if '자체 점검 보조 정보: THP' in c)
+        thp = next(c for c in self.cards if '<th scope="col">THP enabled</th>' in c)
         self.assertIn('<details class="res-en"><summary>공식 조치 안내(Resolution, 마스킹, 영문 원문)</summary>', thp)
         self.assertIn('Set THP to madvise.', thp)
         self.assertNotIn('<details open', self.page)
@@ -968,9 +971,7 @@ class Review054Tests(unittest.TestCase):
         page = a.html_report(a.model(md))
         self.assertIn('한글 해결방안 미등록 — 아래 공식 원문 참고', page)
         self.assertIn('한글 해결방안 미등록 — 아래 공식 원문 참고', a.markdown(a.model(md)))
-        for f in self.r['findings']:
-            if f.get('origin') == 'custom_rule':
-                self.assertEqual(f['resolution_ko']['status'], 'not_applicable')
+        self.assertFalse(any(f.get('origin') == 'custom_rule' for f in self.r['findings']))  # 0.5.5: findings는 공식만
 
     def test_dictionary_covers_known_checks(self):
         known = {cid for case in Replay050Tests.CASES.values() for cid, _, _ in case[1]}
@@ -983,7 +984,7 @@ class Review054Tests(unittest.TestCase):
             self.assertTrue(re.search(r'[가-힣]', text), cid)
 
     def test_json_markdown_schema(self):
-        self.assertEqual(self.r['schema_version'], '1.4-r2')
+        self.assertEqual(self.r['schema_version'], '1.5-r2')
         self.assertEqual(a.SCHEMA_VERSION, '1.2-r1')
         self.assertEqual(self.r['policy']['resolution_ko_version'], a.RESOLUTION_KO_VERSION)
         f = self.official('sys.mem.iommu')
@@ -1018,50 +1019,53 @@ class Review053Tests(unittest.TestCase):
         b = self.buttons()
         s = self.r['official_summary']
         self.assertEqual((b['error'], b['warning']), (s['errors'], s['warnings']))  # 2 · 1
-        self.assertEqual(b['own-info'], 1)
-        self.assertNotIn('own-warning', b)  # THP 자체 경고는 공식 THP 카드에 합쳐짐
+        self.assertFalse([k for k in b if k.startswith('own-')])  # 0.5.5: 자체 버튼 없음
         self.assertIn('공식 판정 카드: 오류 2 · 경고 1 (mc 보고서 요약: 통과 32 · 오류 2 · 경고 1)', self.page)
-        self.assertIn('자체 점검(이 도구, 공식 숫자에 더하지 않음): 통과 4 · 실패 0 · 경고 1 · 미평가 1 · 정보 1.', self.page)
+        self.assertNotIn('자체 점검(이 도구', self.page)
         self.assertEqual(len(re.findall(r'data-sev="warning"', self.page)), 2)  # 버튼 1 + 카드 1
 
     def test_thp_iommu_merged_into_official_cards(self):
         thp = [c for c in self.cards if 'Transparent Huge Pages' in c or 'THP' in re.search(r'<h3>(.*?)</h3>', c).group(1)]
         self.assertEqual(len(thp), 1)
         self.assertIn('data-sev="warning"', thp[0])
-        self.assertIn('자체 점검 보조 정보: THP', thp[0])
-        self.assertIn('server-0001: enabled=always, defrag=madvise, max_ptes_none=511', thp[0])
-        iommu = [c for c in self.cards if '자체 점검 보조 정보: 명시적 IOMMU' in c]
+        self.assertIn('서버별 관측값(원본 gzip)', thp[0])
+        self.assertIn('<tr><th scope="row">server-0001</th><td>always</td><td>madvise</td><td>511</td></tr>', thp[0])
+        self.assertNotIn('자체', thp[0])  # 배지·자체 결과·조건 문구 없음
+        iommu = [c for c in self.cards if '명시적 IOMMU 부팅 옵션' in c]
         self.assertEqual(len(iommu), 1)
         self.assertIn('data-sev="error"', iommu[0])
-        self.assertIn('자체 결과: 미평가', iommu[0])
-        self.assertEqual(sum('자체 점검 판정 <small>' in c for c in self.cards), 1)  # 수집 오류만 따로
+        self.assertIn('<td>명시 옵션 없음</td>', iommu[0])
+        self.assertNotIn('자체', iommu[0])
+        self.assertNotIn('미평가', iommu[0])
 
     def test_collection_errors_info_not_warning(self):
-        card = next(c for c in self.cards if '설정 변경 대상이 아니라' in c)
-        self.assertIn('data-sev="own-info"', card)
-        self.assertIn('class="card sev-info"', card)
-        self.assertIn('우선순위 해당 없음(정보)', card)
-        f = next(f for f in self.r['findings'] if f.get('rule_id') == 'r2.collection.errors')
-        self.assertEqual((f['rule_result'], f['priority'], f['approval_required']), ('info', 'unclassified', False))
-        self.assertIn('id="collection"', self.page)  # 수집 오류 섹션은 유지
-        self.assertIn('정보 등급(경고 아님)', self.page)
-        self.assertNotIn('r2.collection.errors', [x['rule_id'] for x in self.r['findings'] if x['priority'] == 'P2' and x.get('rule_id')])
+        # 0.5.5: 수집 오류는 카드가 아니라 부록 '수집되지 않은 항목'(등급 없음)에만 둔다.
+        self.assertFalse(any('설정 변경 대상이 아니라' in c for c in self.cards))
+        self.assertFalse(any(f.get('rule_id') == 'r2.collection.errors' for f in self.r['findings']))
+        c = next(c for c in self.r['check_results'] if c.get('rule_id') == 'r2.collection.errors')
+        self.assertEqual(c['rule_result'], 'info')  # 내부 JSON 값은 유지
+        self.assertIn('id="uncollected"', self.page)
+        self.assertIn('부록: 수집되지 않은 항목', self.page)
+        sect = re.search(r'<section id="uncollected">.*?</section>', self.page, flags=re.S).group(0)
+        for word in ('정보 등급', '경고', '✖'):
+            self.assertNotIn(word, sect)
 
     def test_dashboard_priority_and_appendix_consistent(self):
         tiles = dict(re.findall(r'<div class="tile-k">(P\d|미분류)</div><div class="tile-v">(\d+)</div>', self.page))
         self.assertEqual(tiles, {'P1': '0', 'P2': '1', 'P3': '1', 'P4': '0', '미분류': '1'})
         self.assertEqual(sum(map(int, tiles.values())), 3)  # 공식 오류 2 + 경고 1
         md = h.markdown_report(self.r)
-        self.assertRegex(md, r'\| r2\.collection\.errors \| 정보 \|')
-        self.assertIn('자체 점검 실패 0건·경고 1건·미평가 1건·정보 1건', self.page)
-        self.assertIn('정보 1', h.a.result_summary_line(self.r) if hasattr(h, 'a') else a.result_summary_line(self.r))
+        self.assertNotIn('r2.collection.errors', md)  # 자체 규칙표 삭제
+        self.assertNotIn('자체 점검', self.page)
+        self.assertNotIn('정보 1', a.result_summary_line(self.r))
 
     def test_own_card_kept_when_no_official_card(self):
-        r = h.report(body_201(), 1, PREVIEW_MD)  # PREVIEW_MD에 THP 공식 오류·경고가 없으면 자체 카드가 따로 남는다
-        groups = a.card_groups(r['findings'])
-        officials = {f.get('source_check_id') for f, _ in groups if f.get('origin') != 'custom_rule'}
-        thp_card = [f for f, _ in groups if f.get('rule_id') == 'r2.thp.mode']
-        self.assertEqual(bool(thp_card), 'sys.mem.thp' not in officials)
+        # 0.5.5: 공식 THP 카드가 없어도 자체 카드는 만들지 않는다.
+        r = h.report(body_201(), 1, PREVIEW_MD)
+        page = h.html_report(r)
+        self.assertFalse(any(f.get('origin') == 'custom_rule' for f in r['findings']))
+        self.assertEqual(page.count('<article '), len(a.official_cards(r['findings'])))
+        self.assertNotIn('자체 점검', page)
 
     def test_10_15_shape_counts(self):
         line, checks, _ = Replay050Tests.CASES['1015']
@@ -1079,6 +1083,7 @@ class Review052Tests(unittest.TestCase):
         self.r = h.report(body_201(), 1, replay_md(line, checks))
         self.page, self.md = h.html_report(self.r), h.markdown_report(self.r)
         self.find = {f['id']: f for f in self.r['findings']}
+        self.rules = {c['rule_id']: c for c in self.r['check_results'] if c.get('rule_id')}
 
     # -- 판정 고정 -------------------------------------------------------------
     def test_judgment_counts_unchanged(self):
@@ -1091,19 +1096,19 @@ class Review052Tests(unittest.TestCase):
                                    'r2.tls.validity': 'pass', 'r2.thp.mode': 'warning', 'r2.collection.errors': 'info',
                                    'r2.iommu.consistency': None})
         cards = card_texts(self.page)
-        self.assertEqual(len(cards), 4)  # 공식 3장(THP·IOMMU 자체 결과 포함) + 수집 오류 정보 1장
+        self.assertEqual(len(cards), 3)  # 0.5.5: 공식 카드 3장만
         prio = Counter(re.search(r'data-priority="([^"]*)"', c).group(1) for c in cards)
-        self.assertEqual(prio, {'P2': 1, 'P3': 1, 'unclassified': 1, 'none': 1})
+        self.assertEqual(prio, {'P2': 1, 'P3': 1, 'unclassified': 1})
         for key, n in (('P2', 1), ('P3', 1), ('미분류', 1)):
             self.assertIn('<div class="tile-k">%s</div><div class="tile-v">%d</div>' % (key, n), self.page)
 
     def test_iommu_reason_split_keeps_result(self):
-        iommu = self.find['r2.iommu.consistency']
+        iommu = self.rules['r2.iommu.consistency']  # 0.5.5: 내부 JSON(check_results)에만 남음
         self.assertIsNone(iommu['rule_result'])
         self.assertEqual(iommu['assessment'], 'insufficient_data')
-        self.assertEqual(iommu['assessment_reason'], 'explicit_flags_absent_in_cmdline')
-        self.assertEqual(iommu['priority'], 'unclassified')
-        self.assertIn('부팅 옵션(proc-cmdline)은 수집됐으나 iommu·intel_iommu·amd_iommu 옵션이 없음', self.page)
+        self.assertEqual(iommu['reason'], 'explicit_flags_absent_in_cmdline')
+        self.assertNotIn('r2.iommu.consistency', self.find)
+        self.assertIn('<td>명시 옵션 없음</td>', self.page)
         self.assertIn('옵션이 없으면 미평가로 두며', self.r['analysis_summary']['custom_rule_catalog']['r2.iommu.consistency']['condition'])
 
     def test_iommu_reason_variants(self):
@@ -1115,12 +1120,12 @@ class Review052Tests(unittest.TestCase):
                 else:
                     config['config']['proc-cmdline'] = cmd
             r = h.report(body, 1, PREVIEW_MD)
-            f = next((f for f in r['findings'] if f['id'] == 'r2.iommu.consistency'), None)
-            res = next(c['rule_result'] for c in r['check_results'] if c.get('rule_id') == 'r2.iommu.consistency')
-            return res, f and f['assessment_reason']
+            self.assertFalse(any(f['id'] == 'r2.iommu.consistency' for f in r['findings']))
+            c = next(c for c in r['check_results'] if c.get('rule_id') == 'r2.iommu.consistency')
+            return c['rule_result'], c['reason']
         self.assertEqual(run([['ro'], None, ['ro']]), (None, 'proc_cmdline_missing'))
         self.assertEqual(run([['intel_iommu=on'], ['ro'], ['ro']]), (None, 'explicit_flags_unobserved_or_ambiguous'))
-        self.assertEqual(run([['iommu=pt']] * 3), ('pass', None))  # 통과는 카드 없음
+        self.assertEqual(run([['iommu=pt']] * 3)[0], 'pass')
         self.assertEqual(run([['iommu=pt'], ['iommu=pt'], ['iommu=on']]), ('warning', 'explicit_flags_only'))
         for code in ('proc_cmdline_missing', 'explicit_flags_absent_in_cmdline', 'explicit_flags_unobserved_or_ambiguous'):
             self.assertNotEqual(a.label(code), code + ' (%s)' % code)
@@ -1140,15 +1145,18 @@ class Review052Tests(unittest.TestCase):
     # -- 인증서(A3·D6) ------------------------------------------------------------
     def test_certificate_display(self):
         for text in (self.page, self.md):
-            self.assertIn('인증서 기록(원본 gzip, 자체 점검 r2.tls.validity 입력)', text)
+            self.assertIn('인증서 기록(원본 gzip)', text)
             self.assertIn('certificate-0001', text)
             self.assertIn('인증서 만료 시각(공식 Markdown 기준)', text)
-            self.assertIn('공식 mc 보고서의 TLS 검사와는 별개 판정', text)
+            self.assertNotIn('r2.tls.validity', text)  # 0.5.5: 자체 규칙 언급 없음
+            self.assertNotIn('별개 판정', text)
             self.assertNotIn('canary-subject', text)
         body = body_201()
         body['minio']['info']['tls'] = {'tls_enabled': False}
         r = h.report(body, 1, PREVIEW_MD)
-        self.assertIn('인증서 기록 없음(TLS 꺼짐 또는 미제공). r2.tls.validity는 미평가로 남습니다.', h.html_report(r))
+        page = h.html_report(r)
+        self.assertIn('인증서 기록 없음(TLS 꺼짐 또는 미제공).', page)
+        self.assertNotIn('미평가로 남습니다', page)
 
     def test_certificate_reason_row_korean_or_absent(self):
         rows = dict(row for block in a.info_blocks(self.r) if block[0] == 'table' for row in block[2] if len(row) == 2)
@@ -1159,19 +1167,18 @@ class Review052Tests(unittest.TestCase):
 
     # -- B1·B2·D7 -----------------------------------------------------------------
     def test_priority_basis_and_conclusion(self):
-        self.assertIn('산정 기준: 카드 1장을 1건으로 셉니다. 공식 검사는 이 도구에 등록된 검사별 고정값', self.page)
+        self.assertIn('산정 기준: 공식 검사 카드 1장을 1건으로 셉니다. 검사별로 이 도구에 등록된 고정값', self.page)
+        self.assertIn('원본 gzip 관측값은 우선순위에 넣지 않습니다', self.page)
         conclusion = re.search(r'<p class="conclusion">(.*?)</p>', self.page).group(1)
-        self.assertIn('확인이 필요합니다(오류·실패 먼저).', conclusion)
+        self.assertIn('확인이 필요합니다(오류 먼저).', conclusion)
         self.assertIn('현재 서비스 상태를 확정하지 않습니다', conclusion)
 
     def test_collection_errors_not_change_approval(self):
-        f = self.find['r2.collection.errors']
-        self.assertIs(f['approval_required'], False)
-        self.assertIn('설정 변경 대상이 아니라 수집 범위 표시', f['recommendation'])
-        self.assertIs(self.find['r2.thp.mode']['approval_required'], True)
-        self.assertIsNone(self.find['r2.iommu.consistency']['approval_required'])
-        card = next(c for c in card_texts(self.page) if '설정 변경 대상이 아니라' in c)
-        self.assertIn('변경 승인: 불필요', card)
+        # 0.5.5: 자체 규칙은 카드가 없어 승인 표시도 없다. 공식 카드의 승인 표시는 그대로.
+        for rid in ('r2.collection.errors', 'r2.thp.mode', 'r2.iommu.consistency'):
+            self.assertNotIn(rid, self.find)
+            self.assertIn(rid, self.rules)
+        self.assertFalse(any('설정 변경 대상이 아니라' in c for c in card_texts(self.page)))
 
     # -- B5·B6·D3 -----------------------------------------------------------------
     def test_alias_note_gib_and_iommu_recommendation(self):
@@ -1195,25 +1202,26 @@ class Review052Tests(unittest.TestCase):
         for card in card_texts(self.page):
             visible = re.sub(r'<[^>]+>', ' ', card)
             self.assertNotRegex(visible, r' \([a-z]+_[a-z0-9_]+\)')
-        self.assertIn('title="assessable / recognized_error_fields_only"', self.page)
+        self.assertIn('title="assessable / official_import_only"', self.page)
         dash = re.search(r'<section id="dashboard".*?</section>', self.page, flags=re.S).group(0)
         self.assertNotIn('(consistent_observations)', dash)
         self.assertIn('(consistent_observations)', self.md)  # 부록·Markdown은 코드 유지
 
     def test_custom_cards_show_observed_values(self):
+        # 0.5.5: THP·IOMMU 공식 카드에 서버별 관측값 표만(판정 없음).
         cards = card_texts(self.page)
-        custom = [c for c in cards if '자체 점검 판정' in c or '자체 점검 보조 정보' in c]
-        self.assertEqual(len(custom), 3)
-        for c in custom:
-            self.assertIn('관측값(원본 gzip)', c)
-        joined = ''.join(custom)
-        self.assertIn('server-0001: enabled=always, defrag=madvise, max_ptes_none=511', joined)
-        self.assertIn('server-0003: 명시 옵션 없음', joined)
-        self.assertIn('CPU 정보 3행(', joined)
-        self.assertIn('네트워크 정보 3행(', joined)
+        obs = [c for c in cards if '서버별 관측값(원본 gzip)' in c]
+        self.assertEqual(len(obs), 2)
+        joined = ''.join(obs)
+        self.assertIn('<tr><th scope="row">server-0001</th><td>always</td><td>madvise</td><td>511</td></tr>', joined)
+        self.assertIn('<tr><th scope="row">server-0003</th><td>명시 옵션 없음</td></tr>', joined)
+        self.assertNotIn('자체', joined)
         self.assertNotIn('canary', joined)
-        self.assertIn('### 관측값(원본 gzip)', self.md)
-        self.assertNotIn('observed_values', json.dumps(self.r, ensure_ascii=False))  # JSON에는 넣지 않음
+        self.assertIn('### 서버별 관측값(원본 gzip, 판정 아님)', self.md)
+        self.assertIn('| server-0001 | always | madvise | 511 |', self.md)
+        dumped = json.dumps(self.r, ensure_ascii=False)
+        self.assertNotIn('observed_values', dumped)  # JSON에는 넣지 않음
+        self.assertNotIn('server_observations', dumped)
 
     def test_header_meta_and_appendix_versions(self):
         self.assertIn('도구 %s · 분석 상태: 부분 분석' % h.VERSION, self.page)
@@ -1223,11 +1231,73 @@ class Review052Tests(unittest.TestCase):
 
     # -- D1·D2 --------------------------------------------------------------------
     def test_rule_table_result_and_filter_text(self):
-        self.assertIn('| 자체 점검 규칙 | 결과 | 규칙 버전 |', self.md)
-        self.assertRegex(self.md, r'\| r2\.tls\.validity \| 통과 \|')
-        self.assertRegex(self.md, r'\| r2\.iommu\.consistency \| 미평가 \|')
-        self.assertIn('목록 전체 4', self.page)
-        self.assertIn('공식 통과 0 (공식 통과 상세는 원본에 없음, 자체 통과는 부록 규칙표)', self.page)
+        self.assertNotIn('자체 점검 규칙', self.md)  # 0.5.5: 부록 자체 규칙표 삭제
+        self.assertNotIn('r2.tls.validity', self.md)
+        self.assertIn('목록 전체 3', self.page)
+        self.assertIn('공식 통과 0 (공식 통과 상세는 원본에 없음)</button>', self.page)
+
+
+class Review055Tests(unittest.TestCase):
+    """0.5.5: 화면·Markdown의 판정·숫자는 mc 공식 판정만. 자체 점검은 내부 JSON에만 남는다."""
+
+    def setUp(self):
+        line, checks, _ = Replay050Tests.CASES['1116']
+        self.r = h.report(body_201(), 1, replay_md(line, checks))
+        self.page, self.md = h.html_report(self.r), h.markdown_report(self.r)
+
+    def test_no_own_verdicts_badges_or_cards(self):
+        visible = re.sub(r'<script.*?</script>|<style.*?</style>', '', self.page, flags=re.S)
+        for text in (visible, self.md):
+            for word in ('자체 점검', '자체 결과', '자체 판정', 'own-', '보조 정보'):
+                self.assertNotIn(word, text)
+        self.assertNotRegex(self.page, r'data-sev="own-|\bown-(info|warning|error|verdict|aux)')
+        for rid in ('r2.drive.state', 'r2.capacity.bounds', 'r2.version.consistency', 'r2.tls.validity', 'r2.collection.errors'):
+            self.assertNotIn(rid, visible)
+        self.assertEqual(self.page.count('<article '), 3)
+        self.assertIn('id="uncollected"', self.page)
+        self.assertIn('<li class="drv ', self.page)  # 드라이브 격자 유지
+
+    def test_json_keeps_custom_internal_only(self):
+        self.assertEqual(self.r['schema_version'], '1.5-r2')
+        self.assertTrue(all(f.get('origin') != 'custom_rule' for f in self.r['findings']))
+        s = self.r['analysis_summary']
+        self.assertEqual(s['custom_rule_display'], 'internal_only_not_displayed')
+        self.assertEqual(s['custom_rule_counts'], {'pass': 4, 'warning': 1, 'info': 1, 'not_evaluated': 1})
+        self.assertEqual(s['priority_counts'], {'P2': 1, 'P3': 1, 'unclassified': 1})
+        self.assertEqual(len([c for c in self.r['check_results'] if c.get('origin') == 'custom_rule']), 7)
+
+    def test_fail_on_priority_counts_official_only(self):
+        import contextlib, io, tempfile
+        parent = a.secure_dir(a.DEFAULT_OUTPUT_DIR / 'test-artifacts')
+        work = Path(tempfile.mkdtemp(prefix='r2-055-', dir=parent))
+        (work / 'h.json.gz').write_bytes(packed(SYNTHETIC))
+        (work / 'r.md').write_text(PAIRED_MD, encoding='utf-8')
+        def run(*argv):
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                return h.main(list(argv))
+        r = h.report(copy.deepcopy(SYNTHETIC), 1, PAIRED_MD)
+        self.assertEqual(r['run_status'], 'success')
+        self.assertIn(('r2.thp.mode', 'warning'), [(c.get('rule_id'), c['rule_result']) for c in r['check_results']])
+        self.assertEqual([f['priority'] for f in r['findings']], ['unclassified'])  # 공식 카드 1장(미분류)
+        # 자체 THP 경고(예전 P2)는 세지 않는다 → P2 기준이어도 0
+        base = ('--health', str(work / 'h.json.gz'), '--official-report', str(work / 'r.md'))
+        self.assertEqual(run(*base, '--out-dir', str(work / 'o1'), '--fail-on-priority', 'P2'), 0)
+        # gzip 단독: 공식 카드 0장
+        self.assertEqual(run('--health', str(work / 'h.json.gz'), '--out-dir', str(work / 'o2'), '--fail-on-priority', 'P2'), 0)
+        # 공식 P2 카드는 그대로 1 (R1 경로, 공식 THP 경고 = P2)
+        line, checks, _ = Replay050Tests.CASES['1116']
+        (work / 'r2.md').write_text(replay_md(line, checks), encoding='utf-8')
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            rc = a.main(['--official-report', str(work / 'r2.md'), '--out-dir', str(work / 'o3'), '--fail-on-priority', 'P2'])
+        self.assertEqual(rc, 1)
+
+    def test_thp_iommu_observation_tables_without_verdict(self):
+        cards = card_texts(self.page)
+        thp = next(c for c in cards if '<th scope="col">THP enabled</th>' in c)
+        self.assertIn('<th scope="col">max_ptes_none</th>', thp)
+        self.assertIn('판정 아님', thp)
+        for word in ('경고 /', '미평가', '조건', '권장과 다름'):
+            self.assertNotIn(word, re.search(r'<div class="box obs-box">.*?</table>', thp, flags=re.S).group(0))
 
 
 if __name__ == '__main__':

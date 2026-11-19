@@ -22,13 +22,8 @@ const laidOutDetailsChildren = target => target.evaluate(() => {
   return { shown: shown.length, all: kids.length };
 });
 
-// 0.5.3: 같은 설정의 자체 점검(THP·IOMMU)은 열린 공식 카드에 합쳐지므로 카드 수는 그만큼 줄어든다(aistordoctor.card_groups와 같은 규칙).
-const OWN_OFFICIAL = { 'r2.thp.mode': 'sys.mem.thp', 'r2.iommu.consistency': 'sys.mem.iommu' };
-function cardFindings(findings) {
-  const open = new Set(findings.filter(f => f.origin !== 'custom_rule' && f.source_check_id && f.official_status !== 'passed').map(f => f.source_check_id));
-  return findings.filter(f => !(f.origin === 'custom_rule' && open.has(OWN_OFFICIAL[f.rule_id])));
-}
-const cardPriority = f => (f.origin === 'custom_rule' && f.rule_result === 'info' ? 'none' : f.priority);
+// 0.5.5: 화면 카드는 mc 공식 판정만(aistordoctor.official_cards와 같은 규칙). 자체 점검은 JSON 내부 필드에만 있다.
+const cardFindings = findings => findings.filter(f => f.origin !== 'custom_rule');
 
 async function main() {
   const [htmlPath, outputDirectory, hostileHtmlPath] = process.argv.slice(2);
@@ -56,15 +51,15 @@ async function main() {
     });
     await page.goto(pathToFileURL(htmlPath).href, { waitUntil: 'load' });
     assert.equal(await page.locator('article').count(), cards.length);
+    assert.equal(await page.locator('[data-sev^="own-"]').count(), 0);
+    assert(!(await page.locator('body').innerText()).includes('자체 점검'));
     assert((await page.locator('body').innerText()).includes(report.tool_version));
     for (const [select, field] of [['#s', 'official_status'], ['#p', 'priority'], ['#c', 'category']]) {
       const values = await page.locator(`${select} option`).evaluateAll(options => options.map(option => option.value));
       for (const value of values) {
         await page.locator(select).selectOption(value);
         const expected = cards.filter(finding => {
-          const actualField = field === 'official_status' && finding.origin === 'custom_rule'
-            ? '해당 없음 / 자체 결과: ' + (finding.rule_result || '미평가') : field === 'priority' ? cardPriority(finding) : finding[field];
-          return !value || actualField === value;
+          return !value || finding[field] === value;
         }).length;
         const actual = await page.locator('article:visible').count();
         assert.equal(actual, expected);
