@@ -14,7 +14,8 @@ import zlib
 import aistordoctor as a
 import r2_enrichment as enrichment
 
-VERSION = '0.5.5-r2'
+# 0.5.10: 패키지 버전을 따른다. R2 보고서도 aistordoctor의 마스킹·유출 검사를 쓰므로 버전이 같아야 추적할 수 있다.
+VERSION = a.VERSION.rsplit('-', 1)[0] + '-r2'
 SCHEMA_VERSION = '1.5-r2'
 MAX_COMPRESSED = 32 * 1024 * 1024
 MAX_EXPANDED = 64 * 1024 * 1024

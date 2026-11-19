@@ -725,8 +725,16 @@ MASK_SECRET_EXACT = frozenset('pass pwd pw dbpass dbpwd userpass'.split())
 MASK_PASS_COUNT_WORDS = frozenset('check checks test tests item items case cases drive drives disk disks node nodes '
                                   'server servers object objects bucket buckets pool pools set sets file files of out total'.split())
 # 0.5.9(R2): 공식 문서의 mc alias 예시 자리표시자(ACCESS_KEY, <SECRET_KEY>, $MINIO_ROOT_USER)는 원문으로 둔다.
-MASK_MC_PLACEHOLDER = re.compile(r'<[^<>\s]{1,64}>|\$\{?[A-Za-z_][A-Za-z0-9_]{0,63}\}?'
-                                 r'|(?:[A-Z]+_)+(?:KEY|SECRET|USER|PASSWORD)|ACCESSKEY|SECRETKEY|ACCESS|SECRET|USERNAME|PASSWORD')
+# 0.5.10(S1): 자리표시자를 좁힌다. '$이름'·'${이름}'은 대문자 이름이고 작은따옴표 밖일 때만, '<…>'은 대문자나
+# 소문자 한 가지로만 된 이름일 때만, 맨 낱말은 문서에 나오는 목록일 때만 원문으로 둔다('XX_YY_KEY'·'<Abc>'는 가림).
+MASK_MC_PLACEHOLDER = re.compile(r'"?(?:\$[A-Z_][A-Z0-9_]{0,63}|\$\{[A-Z_][A-Z0-9_]{0,63}\})"?'
+                                 r'''|["']?<(?:[A-Z][A-Z0-9_-]{0,63}|[a-z][a-z0-9_-]{0,63})>["']?'''
+                                 r'''|["']?(?:ACCESS_KEY|SECRET_KEY|ACCESS_KEY_ID|SECRET_ACCESS_KEY|ACCESSKEY|SECRETKEY|ACCESS|SECRET'''
+                                 r'''|USERNAME|PASSWORD|USER|MINIO_ROOT_USER|MINIO_ROOT_PASSWORD|ROOT_USER|ROOT_PASSWORD)["']?''')
+# 0.5.10(S1): mc 명령에서 다음 낱말을 값으로 받는 옵션. 별칭·URL·키 자리를 셀 때 값까지 건너뛴다.
+MASK_MC_VALUE_FLAGS = frozenset('--config-dir -c --api --path --lookup --limit-upload --limit-download --custom-header -h '
+                                '--resolve --enc-c --enc-kms --enc-s3 --conn-read-deadline --conn-write-deadline '
+                                '--policy --access-key --secret-key --name --description --expiry'.split())
 
 
 class Masker:
@@ -741,12 +749,21 @@ class Masker:
                              r'''(\s*(?:=>|[:=])\s*|[ \t]+)''')
     # 0.5.9(R3): 닫는 따옴표가 없는 값("password": "값)도 여는 따옴표부터 공백 전까지 값으로 본다.
     secret_value = re.compile(r'''"(?:\\.|[^"\\\n]){0,4096}"|'(?:\\.|[^'\\\n]){0,4096}'|[^\s|,;"']{1,4096}'''
-                              r'''|"[^\s"|,;]{1,4096}|'[^\s'|,;]{1,4096}''')
+                              r'''|"[^"\n|]{1,4096}|'[^'\n|]{1,4096}''')
+    # 0.5.10(S2): 닫는 따옴표가 없으면 공백을 넘어 줄 끝(표 칸 끝)까지 값으로 본다('"password": "Qz Pw34x').
     # 0.5.9(R2): 'mc alias set <별칭> <URL> <접근 키> <비밀 키>'와 'mc config host add …'의 위치 인자 키.
-    mc_alias = re.compile(r'''(?i)(?<![\w-])(mc(?:\.exe)?[ \t]+(?:(?:--?[\w-]{1,40}(?:=[^\s]{0,256})?)[ \t]+){0,8}'''
-                          r'''(?:alias[ \t]+(?:set|add)|config[ \t]+host[ \t]+add)[ \t]+(?:--?[\w-]{1,40}[ \t]+){0,8}'''
-                          r'''[^\s]{1,256}[ \t]+[^\s]{1,8192}[ \t]+)("[^"\n]{1,4096}"|'[^'\n]{1,4096}'|[^\s]{1,4096})'''
-                          r'''(?:([ \t]+)("[^"\n]{1,4096}"|'[^'\n]{1,4096}'|[^\s]{1,4096}))?''')
+    # 0.5.10(S1): 정규식 하나로 묶지 않고 명령 이름부터 낱말 단위로 읽는다(mc_key_spans). 'mcli'·경로·'.exe',
+    # 값을 받는 옵션('--api S3v4', '-C /x'), 줄 끝 '\' 이어짐, 'mc admin user add'를 함께 다룬다.
+    # 낱말 8개(옵션과 그 값) 안에 하위 명령(alias set|add, config host add, admin user add)이 있을 때만 후보로 본다('mc ls' 등은
+    # 정규식에서 바로 거른다). 낱말과 구분자는 겹치는 글자가 없어 미리보기 한 번이 최대 8낱말로 끝난다.
+    mc_cmd = re.compile(r'(?i)(?<![\w.-])mc(?:li)?(?:\.exe)?(?=(?:(?:[ \t]|\\\r?\n)+(?:[^\s`\\]|\\(?!\r?\n))+){0,8}?'
+                        r'(?:[ \t]|\\\r?\n)+(?:alias(?:[ \t]|\\\r?\n)+(?:set|add)|config(?:[ \t]|\\\r?\n)+host(?:[ \t]|\\\r?\n)+add'
+                        r'|admin(?:[ \t]|\\\r?\n)+user(?:[ \t]|\\\r?\n)+add)(?=[ \t]|\\\r?\n))')
+    mc_tok = re.compile(r'''"[^"\n]{0,4096}"|'[^'\n]{0,4096}'|(?:[^\s`\\]|\\(?!\r?\n)){1,4096}''')
+    # 낱말 구분은 공백·탭·줄 끝 '\' 이어짐. 낱말 n개까지를 정규식 한 번으로 잡는다(클래스 본문 내포식이라 pattern을 바깥 반복으로 넘긴다).
+    mc_run = {n: re.compile(r'(?:(?:[ \t]|\\\r?\n)+(?:%s)){0,%d}' % (p, n)) for p in (mc_tok.pattern,) for n in range(1, 41)}
+    mc_anchor = re.compile(r'[A-Za-z][A-Za-z0-9+.-]{0,20}://\S*|identifier-\d{3,}')
+    pass_follow = re.compile(r'[ \t]+([A-Za-z]+)')
     pem_begin = re.compile(r'-----BEGIN ([A-Z0-9 ]{1,40})-----')
     pem_end = re.compile(r'-----END [A-Z0-9 ]{1,40}-----')
     bearer = re.compile(r'(?i)(?<![A-Za-z0-9_])Bearer[ \t]+[^\s"\'<>|,;]{1,4096}')
@@ -755,9 +772,10 @@ class Masker:
     email = re.compile(r'(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63}){0,126}')
     # 0.5.7(N2): 값에 괄호를 넣지 않는다('(CN=minio)'의 닫는 괄호 보존).
     subject = re.compile(r'(?<![A-Za-z0-9_])((?:CN|OU|O|emailAddress)[ \t]*=[ \t]*|(?:CN|DNS|URI)[ \t]*:[ \t]*)([^,/\n\r"\'|<>+;()]{1,253})')
-    # 0.5.9(R3): 뒤에 '-1'처럼 짧은 꼬리(인터페이스 번호 등)가 붙어도 MAC으로 본다. 2자리 16진수 묶음이 더 이어지면 MAC이 아니다.
+    # 0.5.9(R3): 뒤에 '-1'처럼 짧은 꼬리(인터페이스 번호 등)가 붙어도 MAC으로 본다.
+    # 0.5.10(S2): '-10'·'-ab'처럼 두 자리 꼬리도 MAC으로 본다. 2자리 16진수 묶음이 두 개 이상 더 이어질 때(EUI-64 등)만 MAC이 아니다.
     mac = re.compile(r'(?<![0-9A-Fa-f:.-])[0-9A-Fa-f]{2}([:-])[0-9A-Fa-f]{2}(?:\1[0-9A-Fa-f]{2}){4}'
-                     r'(?![0-9A-Fa-f:.])(?!-[0-9A-Fa-f]{2}(?![0-9A-Za-z]))')
+                     r'(?![0-9A-Fa-f:.])(?!-[0-9A-Fa-f]{2}-[0-9A-Fa-f]{2}(?![0-9A-Za-z]))')
     # 0.5.7(N3): 점 표기 MAC(Cisco 형식 5254.00ab.cd24), AWS 형식 액세스 키, URL 사용자 정보(scheme://user:pass@).
     mac_dot = re.compile(r'(?<![0-9A-Za-z.])[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}(?![0-9A-Za-z.])')
     aws_key = re.compile(r'(?<![A-Za-z0-9])(?:AKIA|ASIA|AIDA|AROA|AGPA|ANPA|ANVA|AIPA)[A-Z0-9]{12,20}(?![A-Za-z0-9])')
@@ -789,7 +807,9 @@ class Masker:
     # 0.5.9(R1): 이름표 끝 글자와 무관하게(src:·id:·ipv6:·peer_id:) 'X:' 바로 뒤에서도 시작한다('::' 뒤는 제외).
     # 주소 전체가 이미 일치한 자리는 sub가 건너뛰므로 주소 중간에서 다시 시작하지 않는다. 일치해도 ipaddress로
     # IPv6가 아니면 그대로 둔다(시각 12:30:45 등). 후보 하나는 45자 안으로 묶여 선형이다.
-    ipv6 = re.compile(r'(?:(?<![\w:])|(?<=\w:))(?:[0-9a-f]{0,4}:){2,8}[0-9a-f:]{1,4}(?:%[\w-]{1,32})?(?![\w:])', re.I)
+    # 0.5.10: 이름표('src:', '0:')를 일치 안에 넣고 낱말 경계에서만 시작한다. 콜론 뒤 모든 자리에서 다시 시작하던
+    # 0.5.9 방식보다 빠르다('a:a:a:…' 1MB 최악 입력). 어디까지가 이름표인지는 ipv6_part가 정한다.
+    ipv6 = re.compile(r'(?<![\w:])(?:\w{1,64}:)?(?:[0-9a-f]{0,4}:){2,8}[0-9a-f:]{1,4}(?:%[\w-]{1,32})?(?![\w:])', re.I)
 
     def __init__(self, level, public_check_ids=(), *, public_tokens=(), deadline=None):
         self.level = level
@@ -851,7 +871,7 @@ class Masker:
         # 0.5.8(M3): 'pass: 12 checks'처럼 숫자 뒤에 낱말이 이어지는 집계 문장은 비밀번호로 보지 않는다.
         # 0.5.9(R3): 뒤 낱말이 집계 명사일 때만 예외로 한다('pass: 1234 ok'·'PASS: 9999 chars'는 계속 가림).
         if norm == 'pass' and ':' in separator and value.isdigit():
-            follow = re.match(r'[ \t]+([A-Za-z]+)', text[value_end:value_end + 24])
+            follow = self.pass_follow.match(text, value_end, value_end + 24)
             if follow and follow.group(1).lower() in MASK_PASS_COUNT_WORDS:
                 return False
         return True
@@ -921,20 +941,95 @@ class Masker:
         return self.pem_end.sub('[PEM BLOCK REMOVED]', ''.join(out))
 
     def mc_key_hidden(self, value):
-        core = value.strip('"\'')
-        return self.is_placeholder(value) or bool(MASK_MC_PLACEHOLDER.fullmatch(core))
+        if self.is_placeholder(value):
+            return True
+        if value.startswith("'") and '$' in value:
+            return False  # 작은따옴표 안의 '$'는 셸이 풀지 않으므로 실제 값이다.
+        return bool(MASK_MC_PLACEHOLDER.fullmatch(value))
 
-    def mc_alias_secret(self, match):
-        """mc alias set 위치 인자 키가 아직 가려지지 않았는지(사후 검증)."""
-        return any(v is not None and not self.mc_key_hidden(v) for v in (match.group(2), match.group(4)))
+    def mc_tokens(self, text, pos, limit=24):
+        """pos 뒤를 공백·줄 끝 '\' 이어짐으로 나눈 낱말 (시작, 끝, 값) 목록. 줄바꿈·백틱에서 멈춘다."""
+        run = self.mc_run[limit].match(text, pos)  # 공백으로 이어진 낱말 limit개까지를 한 번에 잡는다.
+        # 이스케이프된 줄바꿈 표기('\', 글자 그대로의 '\n')는 낱말로 세지 않는다.
+        return [(tok.start(), tok.end(), tok.group(0)) for tok in self.mc_tok.finditer(text, pos, run.end())
+                if tok.group(0) not in ('\\', '\\n', '\\r\\n')]
 
-    def _mc_alias_sub(self, match):
-        self.tick()
-        head, key1, gap, key2 = match.groups()
-        out = head + (key1 if self.mc_key_hidden(key1) else '[REDACTED]')
-        if key2 is not None:
-            out += gap + (key2 if self.mc_key_hidden(key2) else '[REDACTED]')
+    @staticmethod
+    def mc_skip_options(tokens, i, limit=8):
+        """i부터 옵션을 건너뛴 다음 자리. 값을 받는 옵션은 다음 낱말까지 건너뛴다."""
+        for _ in range(limit):
+            if i >= len(tokens) or not tokens[i][2].startswith('-') or tokens[i][2] == '-':
+                break
+            flag = tokens[i][2]
+            i += 2 if '=' not in flag and flag.lower() in MASK_MC_VALUE_FLAGS else 1
+        return i
+
+    def mc_positionals(self, tokens, i):
+        out = []
+        while i < len(tokens) and len(out) < 8:
+            j = self.mc_skip_options(tokens, i)
+            if j > i:
+                i = j
+                continue
+            out.append(tokens[i])
+            i += 1
         return out
+
+    def mc_key_spans(self, text):
+        """mc·mcli 명령줄에서 위치 인자로 준 키 낱말 (시작, 끝, 값) 목록. 마스킹과 사후 검증이 같이 쓴다.
+
+        첫 낱말을 정규식으로 거른 뒤 하위 명령이 보일 만큼(최대 20개) 읽고, 맞을 때만 키까지(최대 40개) 읽는다.
+        명령 이름 하나당 읽는 양이 묶여 있고, 키를 찾은 명령은 마지막 키 뒤부터 다음 명령을 찾으므로 입력에 선형이다.
+        """
+        spans = []
+        if 'mc' not in text.lower():
+            return spans
+        pos = 0
+        while True:
+            cmd = self.mc_cmd.search(text, pos)
+            if not cmd:
+                return spans
+            pos = cmd.end()
+            self.tick()
+            # 옵션 없는 흔한 형태(하위 명령 3 + 별칭·URL·키 2 + 여유)를 한 번에 읽는다. 앞이나 사이에 옵션이 있으면
+            # 옵션 몫만큼 더 읽는다(최대 40개).
+            tokens = self.mc_tokens(text, pos, 11)
+            i = self.mc_skip_options(tokens, 0)
+            if len(tokens) == 11 and (i or any(t[2].startswith('-') for t in tokens[3:])):
+                tokens = self.mc_tokens(text, pos, 40)
+                i = self.mc_skip_options(tokens, 0)
+            words = [t[2].lower() for t in tokens[i:i + 3]]
+            if words[:2] in (['alias', 'set'], ['alias', 'add']):
+                args, by_url = self.mc_positionals(tokens, i + 2), True
+            elif words == ['config', 'host', 'add']:
+                args, by_url = self.mc_positionals(tokens, i + 3), True
+            elif words == ['admin', 'user', 'add']:
+                args, by_url = self.mc_positionals(tokens, i + 3), False
+            else:
+                continue
+            at = 0
+            if by_url:
+                # URL(또는 이미 가린 URL) 뒤 두 낱말이 키다. URL 모양이 없으면 '별칭 URL' 다음 자리로 본다.
+                at = next((k for k, t in enumerate(args) if self.mc_anchor.fullmatch(t[2].strip('"\''))), 1)
+            keys = args[at + 1:at + 3]
+            spans.extend(keys)
+            if keys:
+                pos = keys[-1][1]
+
+    def mc_secret(self, text):
+        """mc 명령줄의 위치 인자 키가 아직 가려지지 않았는지(사후 검증)."""
+        return any(not self.mc_key_hidden(value) for _, _, value in self.mc_key_spans(text))
+
+    def redact_mc_keys(self, text):
+        out, pos = [], 0
+        for start, end, value in sorted(set(self.mc_key_spans(text))):
+            if start < pos or self.mc_key_hidden(value):
+                continue
+            out.append(text[pos:start])
+            out.append('[REDACTED]')
+            pos = end
+        out.append(text[pos:])
+        return ''.join(out)
 
     def redact_secrets(self, text):
         out, pos = [], 0
@@ -976,8 +1071,25 @@ class Masker:
         except ValueError:
             return False
 
+    def ipv6_part(self, value):
+        """value 안에서 가릴 IPv6의 시작 위치. 없으면 -1.
+
+        이름표('src:')가 붙어 있으면 첫 콜론 뒤부터 본다.
+        0.5.10(S3): '0:2001:db8:0:0:0:0:0:7'·'src:0:2001:…'처럼 숫자 묶음이 이름표와 주소 사이에 끼면 둘째 콜론 뒤까지 본다.
+        """
+        cut = 0
+        for _ in range(3):
+            if self.is_ipv6(value[cut:]):
+                return cut
+            cut = value.find(':', cut) + 1
+            if not 0 < cut < len(value):
+                break
+        return -1
+
     def _ipv6_sub(self, match):
-        return self.alias(match) if self.is_ipv6(match.group(0)) else match.group(0)
+        value = match.group(0)
+        cut = self.ipv6_part(value)
+        return value if cut < 0 else value[:cut] + self.alias_value(value[cut:])
 
     def string(self, text):
         if self.deadline is not None:
@@ -986,7 +1098,7 @@ class Masker:
         text = self.bearer.sub('Bearer [REDACTED]', text)
         text = self.userinfo.sub(lambda m: m.group(1) + '[REDACTED]' + (':[REDACTED]' if m.group(3) is not None else '') + '@', text)
         text = self.aws_key.sub('[REDACTED]', text)
-        text = self.mc_alias.sub(self._mc_alias_sub, text)
+        text = self.redact_mc_keys(text)
         text = self.redact_secrets(text)
         text = self.jwt.sub('[JWT REMOVED]', text)
         text = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', text)
@@ -1058,8 +1170,8 @@ class Masker:
                 break
         if self.secret_spans(text):
             found.append('secret')
-        if any(self.mc_alias_secret(m) for m in self.mc_alias.finditer(text)):
-            found.append('secret')  # 0.5.9(R2)
+        if self.mc_secret(text):
+            found.append('secret')  # 0.5.9(R2), 0.5.10(S1)
         if self.aws_key.search(text) or any(not self.is_placeholder(m.group(2)) for m in self.userinfo.finditer(text)):
             found.append('secret')
         if self.mac_dot.search(text):
@@ -1074,7 +1186,7 @@ class Masker:
             found.append('uuid')
         if self.ipv4_leak.search(text):
             found.append('ipv4')
-        if any(self.is_ipv6(m.group(0)) for m in self.ipv6.finditer(text)):
+        if any(self.ipv6_part(m.group(0)) >= 0 for m in self.ipv6.finditer(text)):
             found.append('ipv6')  # 0.5.8(M2)
         if any(self.host_sensitive(m.group(0)) and not self.is_public(m.group(0)) for m in self.host.finditer(text)):
             found.append('host')

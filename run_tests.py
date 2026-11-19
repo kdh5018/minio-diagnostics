@@ -1045,5 +1045,68 @@ class Fix059Tests(unittest.TestCase):
             a.Masker('strict').string(text)
             self.assertLess(a.time.monotonic() - started, 3.0, unit)
 
+
+class Fix0510Tests(Fix059Tests):
+    """0.5.10: Shield 0.5.9 재점검 S1(mc 명령 변형의 위치 인자 키)·S2·S3·R2 보고서 버전. 모두 합성 값."""
+
+    K1, K2 = 'QZAKs1x01', 'QZSKs1y02'
+
+    def s1_cases(self):
+        k1, k2, cont = self.K1, self.K2, chr(92) + chr(10)
+        return (
+            'mcli alias set m http://h:9000 %s %s' % (k1, k2),
+            'mc alias set --api S3v4 m http://h:9000 %s %s' % (k1, k2),
+            'mc --config-dir /x alias set m http://h:9000 %s %s' % (k1, k2),
+            'mc -C /x alias set m http://h:9000 %s %s' % (k1, k2),
+            'mc alias set m http://h:9000 %s  %s %s' % (cont, k1, k2),
+            'mc alias set m %s http://h:9000 %s %s %s --api s3v4' % (cont, k1, cont, k2),
+            "mc alias set m http://h:9000 %s '$Abc%s'" % (k1, k2),
+            'mc alias set m http://h:9000 %s "${Abc%s}"' % (k1, k2),
+            'mc alias set m http://h:9000 %s "<Abc%s>"' % (k1, k2),
+            'mc alias set m http://h:9000 %s XX_YY%s_KEY' % (k1, k2),
+            'mc admin user add m %s %s' % (k1, k2),
+            'mcli admin user add m %s %s' % (k1, k2),
+            '/usr/local/bin/mcli --insecure alias set m https://h:9000 %s %s' % (k1, k2),
+            '| `MCLI ALIAS SET m http://h:9000 "%s" "%s"` | x |' % (k1, k2),
+            'mc  alias  set  --path  auto  m  http://h:9000  %s  %s' % (k1, k2),
+        )
+
+    def test_s1_mc_variants_masked(self):
+        for line in self.s1_cases():
+            with self.subTest(line=line):
+                self.assert_hidden(line, (self.K1[:6], self.K2[:6]))
+                self.assertIn('secret', a.Masker('strict').leaks(line))
+                masked = a.Masker('strict').string(line)
+                self.assertEqual(a.Masker('strict').leaks(masked), [], masked)
+
+    def test_s1_placeholders_and_other_mc_lines_kept(self):
+        for line in ('mc alias set m http://h:9000 <ACCESS_KEY> <SECRET_KEY>',
+                     'mc alias set m http://h:9000 <access-key> <secret-key>',
+                     'mc ls m/bucket', 'mc admin info m', 'mcli alias list'):
+            with self.subTest(line=line):
+                out = a.Masker('basic').string(line)
+                self.assertNotIn('[REDACTED]', out)
+                self.assertEqual(out.split()[-2:], line.split()[-2:])
+                self.assertNotIn('secret', a.Masker('strict').leaks(line))
+
+    def test_s2_s3_shapes_masked(self):
+        for line, needle in (('52-54-00-aa-bb-cc-10 down', '52-54-00'), ('nic 52:54:00:aa:bb:cd-ab up', '52:54:00'),
+                             ('"password": "Qz Pw34x', 'Pw34x'), ('peer 0:2001:db8:0:0:0:0:0:7 up', '2001:db8')):
+            with self.subTest(line=line):
+                self.assert_hidden(line, (needle,))
+        for kept in ('started 12:30:45 ok', 'sha256:abcdef'):
+            self.assertIn(kept, self.bodies(kept)['json'])
+
+    def test_r2_report_version_follows_masker(self):
+        import r2_health as h
+        self.assertEqual(h.VERSION, a.VERSION.rsplit('-', 1)[0] + '-r2')
+
+    def test_new_rules_linear(self):
+        for unit in ('mc alias set a b ', 'mcli -C x alias set a ', 'mc --api ', 'a:', '"password": "x y '):
+            text = unit * (262144 // len(unit))
+            started = a.time.monotonic()
+            a.Masker('strict').string(text)
+            self.assertLess(a.time.monotonic() - started, 3.0, unit)
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
