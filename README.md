@@ -7,8 +7,8 @@ MinIO AIStor 진단 Markdown(mc 보고서)과 원본 diagnostics gzip을 읽어 
 ## 빠른 시작
 
 ```bash
-sha256sum -c aistor-diag-analyzer-0.5.11-el8-x86_64.tar.gz.sha256
-tar -xzf aistor-diag-analyzer-0.5.11-el8-x86_64.tar.gz && cd aistor-diag-analyzer-0.5.11-el8-x86_64
+sha256sum -c aistor-diag-analyzer-0.5.12-el8-x86_64.tar.gz.sha256
+tar -xzf aistor-diag-analyzer-0.5.12-el8-x86_64.tar.gz && cd aistor-diag-analyzer-0.5.12-el8-x86_64
 ./run-report.sh --check --verify-bundle                                   # 사전 점검
 ./run-report.sh --official-report /경로/diag-report-....md \
                 --health /경로/diag-data-....json.gz --allow-partial     # 실행(--health 생략 시 공식 Markdown 단독)
@@ -31,7 +31,7 @@ tar -xzf aistor-diag-analyzer-0.5.11-el8-x86_64.tar.gz && cd aistor-diag-analyze
 
 | 옵션 | 설명 |
 |---|---|
-| `--official-report <md>` / `--health <json.gz>` | 입력. 두 입력은 같은 수집이어야 하며 시각 차 120초 초과·대상 불일치면 거부 |
+| `--official-report <md>` / `--health <json.gz>` | 입력. 두 입력은 같은 수집이어야 하며 시각 차 120초 초과·대상 불일치면 거부. 크기·시간 한도 없음, 단 원본 gzip은 압축 폭탄 방어로 압축 파일·압축 해제 각 256 MiB까지(넘으면 별도 분석 서버에서 실행 권장) |
 | `--allow-partial` | 자료 부족 항목을 미평가로 두고 저장(종료 코드 4) |
 | `--out-dir <dir>` / `--force` | 출력 위치(기본 `~/aistor-diag-output`) / 기존 결과가 있을 때 새 세대 추가 |
 | `--mask strict\|basic` | 마스킹 수준(기본 strict). 공유 전 수동 검토 필요 |
