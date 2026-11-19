@@ -156,7 +156,7 @@ class R2Tests(unittest.TestCase):
         # 0.5.11: 서버 1,200대·드라이브 24,000개·JSON 요소 20만 개 이상도 기본 한도에 걸리지 않는다.
         for name in ('SECONDS', 'MAX_NODES', 'MAX_SERVERS', 'MAX_DRIVES'):
             self.assertIsNone(getattr(h, name), name)
-        self.assertEqual(h.MAX_EXPANDED, 1024 * 1024 * 1024)  # 압축 폭탄 방어는 남긴다.
+        self.assertEqual(h.MAX_EXPANDED, 256 * 1024 * 1024)  # 압축 폭탄 방어는 남긴다(0.5.12: 256 MiB).
         body = copy.deepcopy(SYNTHETIC)
         server = body['minio']['info']['servers'][0]
         body['minio']['info']['servers'] = [dict(server, endpoint='node-%04d.qz.example.com:9000' % n,
@@ -176,6 +176,45 @@ class R2Tests(unittest.TestCase):
         bomb = gzip.compress(b' ' * (2 * 1024 * 1024))
         with patch.object(h, 'MAX_EXPANDED', 1024 * 1024), self.assertRaises(a.InputError):
             h.decode(bomb)
+
+    def test_0512_bomb_limits_are_256_mib(self):
+        # 0.5.12: 압축 파일·압축 해제 상한 256 MiB. 시간 한도는 다시 넣지 않는다.
+        self.assertEqual(h.MAX_COMPRESSED, 256 * 1024 * 1024)
+        self.assertEqual(h.MAX_EXPANDED, 256 * 1024 * 1024)
+        self.assertIsNone(h.SECONDS)
+        self.assertIsNone(a.MAX_PROCESS_SECONDS)
+
+    def test_0512_expanded_over_256_mib_rejected_by_default(self):
+        bomb = gzip.compress(b' ' * (256 * 1024 * 1024 + 1), compresslevel=1)
+        self.assertLess(len(bomb), 2 * 1024 * 1024)
+        with self.assertRaises(a.InputError) as caught:
+            h.decode(bomb)
+        del bomb
+        # decode는 안쪽 상한 오류를 일반 입력 오류로 감싼다(예외 종류는 그대로). 안내는 안쪽 원인을 보인다.
+        self.assertEqual(caught.exception.__cause__.args[0], 'expanded size limit')
+        lines = a.describe_input_error(caught.exception, '원본 gzip')
+        self.assertIn('256 MiB', lines[0])
+        self.assertIn('분석 서버에서 실행', lines[0])
+
+    def test_0512_compressed_over_256_mib_rejected_by_default(self):
+        data = b'\x1f\x8b' + bytes(256 * 1024 * 1024 - 1)
+        with self.assertRaises(a.InputError) as caught:
+            h.decode(data)
+        del data
+        self.assertEqual(caught.exception.args[0], 'gzip signature or compressed limit')
+        lines = a.describe_input_error(caught.exception, '원본 gzip')
+        self.assertIn('256 MiB', lines[0])
+        self.assertIn('분석 서버에서 실행', lines[0])
+
+    def test_0512_no_time_limit_even_when_clock_jumps(self):
+        # 시계가 호출마다 1시간씩 흘러도(아주 느린 서버) 시간 때문에 거부하지 않는다.
+        import itertools
+        clock = itertools.count(0, 3600)
+        with patch('time.monotonic', side_effect=lambda: float(next(clock))):
+            decoded, count = h.decode(packed(SYNTHETIC))
+            r = h.report(decoded, count)
+        self.assertNotIn('canary-secret', json.dumps(r, ensure_ascii=False))
+        self.assertNotIn('secret.internal', json.dumps(r, ensure_ascii=False))
 
     def test_time_and_node_limits(self):
         for constant in ('SECONDS', 'MAX_NODES'):

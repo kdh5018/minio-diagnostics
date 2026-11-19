@@ -19,7 +19,7 @@ import sys
 import time
 import uuid
 
-VERSION = '0.5.11-r1'
+VERSION = '0.5.12-r1'
 SCHEMA_VERSION = '1.2-r1'
 PARSER_VERSION = 'official-markdown-r1-2'
 POLICY_VERSION = 'r1-1'
@@ -135,8 +135,8 @@ INPUT_ERROR_HINTS = {
     'as-of must include timezone': '--as-of에는 시간대가 필요합니다. 예: 2026-10-12T09:00:00+09:00 또는 2026-10-12T00:00:00Z',
     'timezone-aware as-of required': '--as-of에는 시간대가 필요합니다. 예: 2026-10-12T09:00:00+09:00 또는 2026-10-12T00:00:00Z',
     'Markdown limit': '공식 Markdown 크기 제한을 넘었습니다(기본은 한도 없음).',
-    'gzip signature or compressed limit': 'gzip 파일이 아니거나 압축 파일 크기 제한(1 GiB)을 넘었습니다. 공식 Markdown은 --official-report로 지정하십시오.',
-    'expanded size limit': '압축 해제 크기 제한(1 GiB, 압축 폭탄 방어)을 넘었습니다.',
+    'gzip signature or compressed limit': 'gzip 파일이 아니거나 압축 파일 크기 제한(256 MiB)을 넘었습니다. 공식 Markdown은 --official-report로 지정하십시오. 정상 진단 파일이 이보다 크면 운영 서버가 아닌 별도 분석 서버에서 실행하는 것을 권장합니다.',
+    'expanded size limit': '압축 해제 크기 제한(256 MiB, 압축 폭탄 방어)을 넘었습니다. 정상 진단 파일이 이보다 크면 운영 서버가 아닌 별도 분석 서버에서 실행하는 것을 권장합니다.',
     'nesting limit': 'JSON 중첩 깊이 제한(64단계)을 넘었습니다.',
     'serialized string limit before decoding': 'JSON 문자열 길이 제한을 넘었습니다.',
     'scalar token limit before decoding': 'JSON 값 길이 제한을 넘었습니다.',
@@ -172,6 +172,13 @@ def describe_input_error(exc, label='입력 파일'):
         if isinstance(exc, UnicodeError):
             return [label + '이(가) UTF-8 텍스트가 아닙니다. 원본 gzip(diag-data-*.json.gz)은 --health로 지정하십시오.']
         message = exc.args[0] if isinstance(exc, InputError) and exc.args and isinstance(exc.args[0], str) else None
+        if message == 'invalid or limited diagnostic input':
+            # 0.5.12: r2_health.decode가 안쪽의 구체적 InputError(압축 해제 상한 등)를 이 일반 오류로 감싼다.
+            # 바로 안쪽 원인이 안내가 있는 InputError면 그 안내를 보인다(예외 종류·종료 코드는 그대로).
+            cause = exc.__cause__
+            inner = cause.args[0] if isinstance(cause, InputError) and cause.args and isinstance(cause.args[0], str) else None
+            if inner in INPUT_ERROR_HINTS:
+                return [label + ': ' + INPUT_ERROR_HINTS[inner]]
         if message in INPUT_ERROR_HINTS:
             return [label + ': ' + INPUT_ERROR_HINTS[message]]
         exc = exc.__cause__ or exc.__context__
