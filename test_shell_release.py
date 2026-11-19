@@ -131,6 +131,7 @@ class ShellEntrypointTests(unittest.TestCase):
                 ': > %s\n'
                 'for x in "$@"; do printf "%%s\\0" "$x" >> %s; done\n'
                 'if [ -n "${STUB_GEN:-}" ]; then echo "결과 세트 확정: $STUB_GEN"; fi\n'
+                'if [ -n "${STUB_PARENT_SIG:-}" ]; then kill -"$STUB_PARENT_SIG" $PPID; kill -"$STUB_PARENT_SIG" $$; fi\n'
                 'if [ -n "${STUB_SIG:-}" ]; then kill -"$STUB_SIG" $$; fi\n'
                 'exit "${STUB_RC:-0}"\n') % (shlex.quote(version), shlex.quote(str(self.args_log)), shlex.quote(str(self.args_log)))
 
@@ -142,7 +143,7 @@ class ShellEntrypointTests(unittest.TestCase):
     def run_sh(self, bundle, *args, cwd=None, env=None, direct=False):
         e = dict(os.environ)
         e['HOME'] = str(self.home)
-        for key in ('STUB_RC', 'STUB_GEN', 'STUB_SIG'):
+        for key in ('STUB_RC', 'STUB_GEN', 'STUB_SIG', 'STUB_PARENT_SIG'):
             e.pop(key, None)
         e.update(env or {})
         script = str(bundle / 'run-report.sh')
@@ -276,6 +277,14 @@ class ShellEntrypointTests(unittest.TestCase):
             if sig == 9:
                 self.assertIn('OOM killer', p.stderr)
                 self.assertIn('메모리 상한을 늘리거나 더 큰 분석 서버에서 실행하세요', p.stderr)
+        # systemd MemoryMax 스코프처럼 run-report.sh 자신도 종료 시그널을 받는 경우
+        for sig, rc in (('TERM', 143), ('HUP', 129)):
+            p = self.run_sh(bundle, '--official-report', report, '--out-dir', str(out), '--fail-on-priority', 'P1',
+                            env={'STUB_PARENT_SIG': sig})
+            self.assertEqual(p.returncode, rc, p.stderr)
+            self.assertIn('이번 실행의 보고서를 저장하지 않았습니다', p.stderr)
+            self.assertIn('메모리 상한을 늘리거나 더 큰 분석 서버에서 실행하세요', p.stderr)
+            self.assertNotIn('보고서를 저장했고', p.stdout + p.stderr)
         self.assertFalse(out.exists())
 
     def test_0513_real_memory_limit_gives_exit_6_and_no_files(self):

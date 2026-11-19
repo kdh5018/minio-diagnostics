@@ -610,8 +610,20 @@ args+=("--out-dir=$OUT_DIR" "--mask=$MASK")
 say "[$MODE] 분석 시작 (네트워크·설치 없음)"
 printf '  - %s\n' "${CHECK_LINES[@]}"
 
+# 0.5.13: 분석 중 이 스크립트가 종료 시그널을 받으면(예: systemd MemoryMax 스코프가 OOM 뒤 남은 프로세스를 정리)
+# "저장 안 됨"을 안내하고 128+N으로 끝낸다. 결과 세트 확정 안내를 읽기 전이므로 저장으로 보지 않는다.
+on_signal() {
+    trap - HUP INT TERM
+    err "중단(종료 코드 $2): 분석 중 시그널 $1(으)로 중단되어 이번 실행의 보고서를 저장하지 않았습니다. 기존 확정 결과는 그대로입니다."
+    err "  메모리 한도(ulimit·systemd MemoryMax 등) 때문이면 메모리 상한을 늘리거나 더 큰 분석 서버에서 실행하세요."
+    exit "$2"
+}
+trap 'on_signal HUP 129' HUP
+trap 'on_signal INT 130' INT
+trap 'on_signal TERM 143' TERM
 output=$("$PY" -E -s -B -X utf8 "${args[@]}")
 rc=$?
+trap - HUP INT TERM
 [ -z "$output" ] || printf '%s\n' "$output"
 
 GENERATION=
