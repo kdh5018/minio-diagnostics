@@ -177,6 +177,26 @@ class R2Tests(unittest.TestCase):
         with patch.object(h, 'MAX_EXPANDED', 1024 * 1024), self.assertRaises(a.InputError):
             h.decode(bomb)
 
+    def test_0513_entrypoint_maps_memory_error_to_exit_6(self):
+        # Shield 0.5.12 N1: MemoryError는 처리하지 않은 예외의 1이 아니라 6과 고정 안내로 끝난다(트레이스백 없음).
+        import subprocess
+        import sys
+        root = Path(__file__).resolve().parent
+        for flag in ('--health=x.json.gz', '--official-report=x.md'):
+            target = 'r2_health' if flag.startswith('--health') else 'aistordoctor'
+            code = ('import sys, runpy; sys.path.insert(0, %r); import %s as m\n'
+                    'def boom(*a, **k): raise MemoryError()\n'
+                    'm.main = boom\n'
+                    'sys.argv = ["analyze.py", %r]\n'
+                    'runpy.run_path(%r, run_name="__main__")\n') % (str(root), target, flag, str(root / 'analyze.py'))
+            p = subprocess.run([sys.executable, '-X', 'utf8', '-c', code], capture_output=True, timeout=60)
+            err = p.stderr.decode('utf-8')
+            self.assertEqual(p.returncode, 6, err)
+            self.assertIn('메모리 부족으로 보고서를 저장하지 않았습니다', err)
+            self.assertIn('메모리 상한(ulimit 등)을 늘리거나 더 큰 분석 서버에서 실행하세요', err)
+            self.assertNotIn('Traceback', err)
+            self.assertEqual(p.stdout, b'')
+
     def test_0512_bomb_limits_are_256_mib(self):
         # 0.5.12: 압축 파일·압축 해제 상한 256 MiB. 시간 한도는 다시 넣지 않는다.
         self.assertEqual(h.MAX_COMPRESSED, 256 * 1024 * 1024)

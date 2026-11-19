@@ -131,6 +131,7 @@ class ShellEntrypointTests(unittest.TestCase):
                 ': > %s\n'
                 'for x in "$@"; do printf "%%s\\0" "$x" >> %s; done\n'
                 'if [ -n "${STUB_GEN:-}" ]; then echo "결과 세트 확정: $STUB_GEN"; fi\n'
+                'if [ -n "${STUB_SIG:-}" ]; then kill -"$STUB_SIG" $$; fi\n'
                 'exit "${STUB_RC:-0}"\n') % (shlex.quote(version), shlex.quote(str(self.args_log)), shlex.quote(str(self.args_log)))
 
     def stub_args(self):
@@ -141,7 +142,7 @@ class ShellEntrypointTests(unittest.TestCase):
     def run_sh(self, bundle, *args, cwd=None, env=None, direct=False):
         e = dict(os.environ)
         e['HOME'] = str(self.home)
-        for key in ('STUB_RC', 'STUB_GEN'):
+        for key in ('STUB_RC', 'STUB_GEN', 'STUB_SIG'):
             e.pop(key, None)
         e.update(env or {})
         script = str(bundle / 'run-report.sh')
@@ -219,7 +220,7 @@ class ShellEntrypointTests(unittest.TestCase):
         bundle = self.make_bundle(runtime='stub')
         report = self.write_input('in/r.md')
         gen = str(self.base / 'out/run-stub')
-        for rc in (0, 1, 2, 3, 4, 9):
+        for rc in (0, 1, 2, 3, 4, 6, 9, 137):
             for with_gen in (True, False):
                 env = {'STUB_RC': str(rc)}
                 if with_gen:
@@ -231,6 +232,106 @@ class ShellEntrypointTests(unittest.TestCase):
                     self.assertIn('부분 분석(종료 코드 4)', p.stdout)
                 if rc == 4 and not with_gen:
                     self.assertIn('--allow-partial', p.stderr)
+
+    def test_0513_exit_code_1_saved_message_only_when_saved_and_requested(self):
+        # Shield 0.5.12 N1: 처리하지 않은 예외도 1이다. "보고서를 저장했고" 안내는 결과 확정 + --fail-on-priority일 때만.
+        bundle = self.make_bundle(runtime='stub')
+        report = self.write_input('in/r.md')
+        gen = str(self.base / 'out/run-stub')
+        saved = '보고서를 저장했고'
+        cases = ((True, True, True), (True, False, False), (False, True, False), (False, False, False))
+        for with_gen, with_fail_on, expect_saved in cases:
+            env = {'STUB_RC': '1'}
+            if with_gen:
+                env['STUB_GEN'] = gen
+            extra = ['--fail-on-priority', 'P2'] if with_fail_on else []
+            p = self.run_sh(bundle, '--official-report', str(report), '--out-dir', str(self.base / 'out'), *extra, env=env)
+            self.assertEqual(p.returncode, 1)
+            both = p.stdout + p.stderr
+            self.assertEqual(saved in both, expect_saved, (with_gen, with_fail_on, both))
+            if with_gen:
+                self.assertIn(gen + '/aistor-diag-report.html', p.stdout)
+            else:
+                self.assertIn('비정상 종료', p.stderr)
+                self.assertIn('보고서를 저장하지 않았습니다', p.stderr)
+                self.assertNotIn('aistor-diag-report.html', both)
+
+    def test_0513_memory_error_and_signal_kill_reported_as_not_saved(self):
+        bundle = self.make_bundle(runtime='stub')
+        report = str(self.write_input('in/r.md'))
+        out = self.base / 'out'
+        p = self.run_sh(bundle, '--official-report', report, '--out-dir', str(out), '--fail-on-priority', 'P1',
+                        env={'STUB_RC': '6'})
+        self.assertEqual(p.returncode, 6)
+        self.assertIn('실패(종료 코드 6): 메모리 부족으로 보고서를 저장하지 않았습니다. '
+                      '메모리 상한을 늘리거나 더 큰 분석 서버에서 실행하세요.', p.stderr)
+        self.assertNotIn('보고서를 저장했고', p.stdout + p.stderr)
+        for sig, rc in ((9, 137), (6, 134), (15, 143)):
+            p = self.run_sh(bundle, '--official-report', report, '--out-dir', str(out), '--fail-on-priority', 'P1',
+                            env={'STUB_SIG': str(sig)})
+            self.assertEqual(p.returncode, rc, p.stderr)
+            self.assertIn('실패(종료 코드 %d)' % rc, p.stderr)
+            self.assertIn('보고서를 저장하지 않았습니다', p.stderr)
+            self.assertNotIn('보고서를 저장했고', p.stdout + p.stderr)
+            if sig == 9:
+                self.assertIn('OOM killer', p.stderr)
+                self.assertIn('메모리 상한을 늘리거나 더 큰 분석 서버에서 실행하세요', p.stderr)
+        self.assertFalse(out.exists())
+
+    def test_0513_real_memory_limit_gives_exit_6_and_no_files(self):
+        # 실제 ulimit -v 아래에서 큰 원본 gzip: 종료 코드 6, 안내, 결과 파일 0개. 같은 상한에서 작은 입력은 정상 저장.
+        import copy
+        import gzip
+        import json
+        import test_r2 as T
+        bundle = self.make_bundle()
+        head = json.dumps(copy.deepcopy(T.SYNTHETIC)).encode()[:-1]
+        inputs = {}
+        for name, units in (('small', 0), ('big', (32 << 20) // 3)):
+            path = self.base / ('%s.json.gz' % name)
+            path.write_bytes(gzip.compress(head + b', "zz": [' + b'{},' * units + b'0]}', 9))
+            inputs[name] = path
+        limit_kb = 600 * 1024
+
+        def limited(name):
+            out = self.base / ('out-' + name)
+            cmd = 'ulimit -v %d && exec %s %s --health %s --out-dir %s --allow-partial' % (
+                limit_kb, shlex.quote(BASH), shlex.quote(str(bundle / 'run-report.sh')),
+                shlex.quote(str(inputs[name])), shlex.quote(str(out)))
+            e = dict(os.environ, HOME=str(self.home))
+            return subprocess.run([BASH, '-c', cmd], cwd=str(self.base), env=e, capture_output=True, text=True,
+                                  timeout=300), out
+
+        p, out = limited('small')
+        self.assertIn(p.returncode, (0, 4), p.stderr)
+        self.assert_report_set(self.generation_of(out))
+        p, out = limited('big')
+        self.assertEqual(p.returncode, 6, (p.stdout, p.stderr))
+        self.assertIn('실패(종료 코드 6): 메모리 부족으로 보고서를 저장하지 않았습니다. '
+                      '메모리 상한을 늘리거나 더 큰 분석 서버에서 실행하세요.', p.stderr)
+        self.assertNotIn('Traceback', p.stderr)
+        self.assertNotIn('보고서를 저장했고', p.stdout + p.stderr)
+        self.assertNotIn('결과 세트 확정', p.stdout)
+        self.assertEqual([f for f in out.rglob('*') if f.is_file()] if out.exists() else [], [])
+
+    def test_0513_real_fail_on_priority_still_saves_and_reports_1(self):
+        # 회귀: 공식 P2 카드가 있는 실제 입력은 --fail-on-priority P2면 저장 + 종료 코드 1 + 저장 안내, 없으면 0.
+        import test_r2 as T
+        bundle = self.make_bundle()
+        line, checks, _ = T.Replay050Tests.CASES['1116']
+        report = self.write_input('in/p2.md', T.replay_md(line, checks))
+        for extra, rc in ((['--fail-on-priority', 'P2'], 1), ([], 0)):
+            out = self.base / ('fop-%d' % rc)
+            p = self.run_sh(bundle, '--official-report', str(report), '--out-dir', str(out), *extra)
+            self.assertEqual(p.returncode, rc, p.stderr)
+            gen = self.generation_of(out)
+            self.assert_report_set(gen)
+            self.assertIn(str(gen / 'aistor-diag-report.html'), p.stdout)
+            self.assertNotIn('비정상 종료', p.stderr)
+            if rc == 1:
+                self.assertIn('완료(종료 코드 1): 보고서를 저장했고 --fail-on-priority P2 조건에 해당하는 항목이 있습니다.', p.stdout)
+            else:
+                self.assertIn('완료(종료 코드 0)', p.stdout)
 
     def test_real_exit_codes_partial_force_and_input_errors(self):
         bundle = self.make_bundle()
