@@ -519,3 +519,19 @@ CSS와 JS를 모두 뺀 사본에서도 카드 전부와 통과·오류·경고 
 - 실자료(201 원본 사본, 로컬에서만): 11/17 `20261117072602` → 공식 카드 오류 2·경고 1(mc 32/2/1), 화면 '자체' 문구 0, THP·IOMMU 관측값 표(server-0001~0003 enabled=always·defrag=madvise·max_ptes_none=511 / 명시 옵션 없음).
   10/15 → 공식 카드 오류 4·경고 1(mc 30/4/1). 둘 다 종료 코드 4. 배포물을 Rocky 8·9·10 minimal 컨테이너(네트워크 없음, 비root)에서 같은 숫자·카드 속성 확인. Chrome·Firefox·WebKit `verify_browser.cjs` 통과.
 - 201 서버 설정 변경·mc 재실행 없음. 0.5.5 배포물의 201 배포는 별도(Rack).
+
+## 0.5.6 보안 수정 (2026-11-19)
+
+- 계기: Shield의 0.5.4(b21b85b) 보안 점검 F1~F11. 0.5.5(727f881)에서 F1·F2·F3·F6·F9·F10이 그대로 남아 있음을 확인(합성 값 20종 중 14종 누출, PEM 입력은 검증 실패로 보고서 없음).
+- 변경
+  - F1 마스킹: 호스트는 TLD(2글자 국가 도메인·주요 gTLD·사내 접미사)로 판단, 파일 확장자·공개 문서 호스트는 제외. 키 이름 기반 비밀값(JSON 따옴표 키, `MINIO_ROOT_USER`, `SUBNET_API_KEY` 등 공백 구분 환경 변수), JWT, 40자 이상 base64, 인증서 주체(CN·OU·O·emailAddress·DNS·URI), 이메일, MAC, UUID.
+    strict 전용: server·host·node·peer·endpoint 등 뒤의 포트 없는 짧은 이름(영어 낱말 제외). 마지막 검증(`verify`)도 같은 탐지기를 씀.
+  - F2 ReDoS: 모든 정규식에 왼쪽 경계 lookbehind와 길이 상한. 64KB 한 줄 0.05~0.22초, 2MiB 약 2초(선형). `Masker`가 256회 치환마다·문자열 시작과 끝에서 처리 시한 확인.
+  - F3 PEM: 선형 스캔으로 블록 제거(`[PEM BLOCK REMOVED]`, 개인 키는 `[PRIVATE KEY REMOVED]`, 닫히지 않은 블록은 끝까지 제거).
+  - F9: Markdown에서 낱말 경계의 `www.`를 `www\.`로.
+  - F10(H1): 소스 실행 기본 출력 폴더 `~/aistor-diag-output`.
+  - F6: `run-report.sh`가 `LD_PRELOAD`·`LD_LIBRARY_PATH`·`LD_AUDIT` 제거. PATH에서 찾은 python3와 그 디렉터리(실제 위치 포함)가 root·본인 소유이고 그룹·기타 쓰기 권한이 없을 때만 사용(아니면 종료 코드 5).
+- 하지 않음: F4 배포물 서명, F5 저장소 공개·LICENSE(소유자 결정). F7(TOCTOU)·F8(CSP)·F11(빌드 tar 필터)은 낮음이라 이번에 손대지 않음.
+- 테스트: `Fix056Tests` 9건(합성 값 20종 × strict·basic × JSON·MD·HTML, 한 줄 결합, PEM 3형태, 64KB 시간, 마스킹 중 시한, www, 공개 참조 유지, 출력 폴더), 셸 2건. 0.5.5 코드에서는 31건 실패·2건 오류.
+  run_tests 68건(건너뜀 3), test_shell_release 35건, test_r2 97건(건너뜀 6). git archive 사본 + 0.5.6 배포물로 통과.
+- 실자료(201 원본 사본, 로컬에서만): 11/17·10/15 모두 종료 코드 4, HTML·Markdown·JSON이 0.5.5와 실행 ID 외 동일. 배포물을 Rocky 8·9·10 minimal 컨테이너(네트워크 없음, 비root)에서 같은 결과·카드 속성 확인.

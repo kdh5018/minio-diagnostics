@@ -212,3 +212,12 @@ THP·IOMMU 공식 카드에는 자체 판정 대신 서버별 관측값(원본 g
 우선순위 타일과 `--fail-on-priority`는 공식 카드만 셉니다. JSON `findings`는 공식만, 자체 규칙 결과는 내부 필드로 유지(스키마 1.5-r2).
 공식 판정·숫자, 종료 코드 의미, 마스킹, 120초 결합 허용치, 0.5.4 한글 해결방안은 그대로입니다.
 상세는 [IMPROVEMENT_PLAN.md](IMPROVEMENT_PLAN.md)의 "0.5.5".
+
+### 2026-11-19 0.5.6 보안 수정(마스킹 누락·ReDoS·PEM 입력)
+
+Shield의 0.5.4 보안 점검에서 나온 항목을 0.5.5 위에서 재현한 뒤 고쳤습니다. 합성 값 20종 중 14종이 0.5.5에서 새고 있었습니다.
+strict·basic 마스킹에 지원 목록 밖 도메인 호스트, JSON `"accessKey":`, `MINIO_ROOT_USER`, 라이선스 JWT, 인증서 CN·SAN, 이메일, MAC, UUID를 추가했고, 포트 없는 짧은 호스트명은 strict에서 가립니다.
+정규식을 선형으로 바꿔 64KB 한 줄 처리가 110초에서 0.2초 이하로 줄었고, 처리 시간 제한은 마스킹 도중에도 적용됩니다. PEM 블록은 지운 채 보고서를 만듭니다.
+그 밖에 Markdown `www.` 자동 링크 차단, 소스 실행 기본 출력 폴더를 `~/aistor-diag-output`으로 통일, `run-report.sh`의 로더 변수 제거와 쓰기 가능한 위치의 시스템 python3 거부.
+공식 판정·숫자, 종료 코드 의미, 120초 결합 허용치, 자원 제한은 그대로입니다.
+상세는 [IMPROVEMENT_PLAN.md](IMPROVEMENT_PLAN.md)의 "0.5.6".
