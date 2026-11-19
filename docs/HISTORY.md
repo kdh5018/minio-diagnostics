@@ -235,3 +235,10 @@ strict·basic 마스킹에 지원 목록 밖 도메인 호스트, JSON `"accessK
 같이 고친 것: 인증서 SAN의 `IP Address:fd00::…`처럼 이름표 콜론 뒤 IPv6 마스킹과 사후 검증, `pass: 12 checks` 과마스킹, `/10.44.33.22 failed access key: X` 같은 조합에서 보고서 생성이 실패하던 문제.
 공식 판정·숫자, 종료 코드 의미, 120초 결합 허용치, 자원 제한은 그대로이며 실자료 보고서는 0.5.7과 같습니다.
 상세는 [IMPROVEMENT_PLAN.md](IMPROVEMENT_PLAN.md)의 "0.5.8".
+
+### 2026-11-19 0.5.9 IPv6 이름표·mc alias 위치 키 수정(Shield 0.5.8 재점검)
+
+Shield가 0.5.8을 "조건부 배포 가능"으로 판정하며 남긴 위험을 고쳤습니다. `src:`·`id:`·`ipv6:`처럼 이름표가 16진수 글자·숫자·밑줄로 끝나면 바로 뒤 IPv6가 남고 사후 검증도 놓치던 문제, `mc alias set`·`mc config host add`에 위치 인자로 준 접근 키·비밀 키가 남던 문제입니다.
+같이 고친 것: 닫는 따옴표 없는 `"password": "값`, `-1` 꼬리가 붙은 MAC, `pass: 1234 ok`.
+공식 판정·숫자, 종료 코드 의미, 120초 결합 허용치, 자원 제한은 그대로이며 실자료 보고서는 0.5.8과 같습니다.
+상세는 [IMPROVEMENT_PLAN.md](IMPROVEMENT_PLAN.md)의 "0.5.9".
