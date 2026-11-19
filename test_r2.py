@@ -152,6 +152,31 @@ class R2Tests(unittest.TestCase):
             with self.subTest(text=text), self.assertRaises(a.InputError):
                 h.decode(gzip.compress(text.encode()))
 
+    def test_large_cluster_not_limited_by_default(self):
+        # 0.5.11: 서버 1,200대·드라이브 24,000개·JSON 요소 20만 개 이상도 기본 한도에 걸리지 않는다.
+        for name in ('SECONDS', 'MAX_NODES', 'MAX_SERVERS', 'MAX_DRIVES'):
+            self.assertIsNone(getattr(h, name), name)
+        self.assertEqual(h.MAX_EXPANDED, 1024 * 1024 * 1024)  # 압축 폭탄 방어는 남긴다.
+        body = copy.deepcopy(SYNTHETIC)
+        server = body['minio']['info']['servers'][0]
+        body['minio']['info']['servers'] = [dict(server, endpoint='node-%04d.qz.example.com:9000' % n,
+                                                 drives=[dict(server['drives'][0], endpoint='/data%d' % d, uuid='u-%d-%d' % (n, d))
+                                                         for d in range(20)]) for n in range(1200)]
+        decoded, count = h.decode(packed(body))
+        self.assertEqual(len(decoded['minio']['info']['servers']), 1200)
+        normalized, _ = h.normalize(decoded)
+        self.assertEqual(len(normalized['servers']), 1200)
+        self.assertEqual(len(normalized['drives']), 24000)
+        r = h.report(decoded, count)
+        page = json.dumps(r, ensure_ascii=False)
+        self.assertNotIn('qz.example.com', page)
+        self.assertNotIn('canary-secret', page)
+
+    def test_gzip_bomb_still_rejected(self):
+        bomb = gzip.compress(b' ' * (2 * 1024 * 1024))
+        with patch.object(h, 'MAX_EXPANDED', 1024 * 1024), self.assertRaises(a.InputError):
+            h.decode(bomb)
+
     def test_time_and_node_limits(self):
         for constant in ('SECONDS', 'MAX_NODES'):
             with patch.object(h, constant, 0), self.assertRaises(a.InputError):

@@ -17,14 +17,17 @@ import r2_enrichment as enrichment
 # 0.5.10: 패키지 버전을 따른다. R2 보고서도 aistordoctor의 마스킹·유출 검사를 쓰므로 버전이 같아야 추적할 수 있다.
 VERSION = a.VERSION.rsplit('-', 1)[0] + '-r2'
 SCHEMA_VERSION = '1.5-r2'
-MAX_COMPRESSED = 32 * 1024 * 1024
-MAX_EXPANDED = 64 * 1024 * 1024
+# 0.5.11: 클러스터 크기에 비례하는 한도(JSON 요소 수·서버 수·드라이브 수·처리 시간)는 기본에서 없앤다(None = 한도 없음).
+# 서버 1대가 압축 해제 약 33 KB·요소 약 3,300개라 이전 MAX_NODES(200,000)는 서버 약 60대에서 막혔다.
+# 남기는 것: 압축 폭탄 방어(압축 해제 1 GiB, 서버 약 3만 대 분량), 중첩 깊이, 값 하나의 길이, 인증서 수.
+MAX_COMPRESSED = 1024 * 1024 * 1024
+MAX_EXPANDED = 1024 * 1024 * 1024
 MAX_DEPTH = 64
-MAX_NODES = 200000
+MAX_NODES = None
 MAX_STRING = 65536
-MAX_SERVERS = 1000
-MAX_DRIVES = 100000
-SECONDS = 10
+MAX_SERVERS = None
+MAX_DRIVES = None
+SECONDS = None
 
 
 def invalid(*args):
@@ -54,7 +57,7 @@ def decode(data):
         structural_units = string_span = atom_span = 0
         quoted = escaped = False
         for index, char in enumerate(text):
-            if index % 65536 == 0 and time.monotonic() - started > SECONDS:
+            if index % 65536 == 0 and a.over_limit(time.monotonic() - started, SECONDS):
                 raise a.InputError('processing time limit')
             if quoted:
                 string_span += 1
@@ -89,7 +92,7 @@ def decode(data):
                 if atom_span > 6 * MAX_STRING + 2:
                     raise a.InputError('scalar token limit before decoding')
             # Conservative lexical allocation guard; exact node count follows decode.
-            if structural_units > 2 * MAX_NODES:
+            if MAX_NODES is not None and structural_units > 2 * MAX_NODES:
                 raise a.InputError('structural token limit before decoding')
         decoder = json.JSONDecoder(object_pairs_hook=pairs, parse_constant=invalid)
         documents, pos = [], 0
@@ -108,7 +111,7 @@ def decode(data):
         while stack:
             value = stack.pop()
             count += 1
-            if count > MAX_NODES or time.monotonic() - started > SECONDS:
+            if a.over_limit(count, MAX_NODES) or a.over_limit(time.monotonic() - started, SECONDS):
                 raise a.InputError('resource limit')
             if isinstance(value, dict):
                 stack.extend(value.keys())
@@ -154,7 +157,7 @@ def normalize(body):
     info = body.get('minio', {}).get('info') if isinstance(body.get('minio'), dict) else None
     if not isinstance(info, dict) or not isinstance(info.get('servers'), list):
         raise a.InputError('minimum server-array structure unavailable')
-    if len(info['servers']) > MAX_SERVERS:
+    if a.over_limit(len(info['servers']), MAX_SERVERS):
         raise a.InputError('server limit')
     servers, drives, notes = [], [], []
     for index, server in enumerate(info['servers']):
@@ -169,7 +172,7 @@ def normalize(body):
             notes.append('drive array missing')
             continue
         for position, drive in enumerate(records):
-            if len(drives) >= MAX_DRIVES:
+            if MAX_DRIVES is not None and len(drives) >= MAX_DRIVES:
                 raise a.InputError('drive limit')
             if not isinstance(drive, dict):
                 notes.append('invalid drive record')
@@ -688,8 +691,8 @@ def main(argv=None):
         if args.official_report:
             markdown_stage = True
             with args.official_report.open('rb') as stream:
-                raw = stream.read(a.MAX_BYTES + 1)
-            if len(raw) > a.MAX_BYTES:
+                raw = stream.read() if a.MAX_BYTES is None else stream.read(a.MAX_BYTES + 1)
+            if a.over_limit(len(raw), a.MAX_BYTES):
                 raise a.InputError('Markdown limit')
             text = raw.decode('utf-8-sig')
             markdown_stage = False

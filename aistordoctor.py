@@ -24,12 +24,15 @@ SCHEMA_VERSION = '1.2-r1'
 PARSER_VERSION = 'official-markdown-r1-2'
 POLICY_VERSION = 'r1-1'
 DEFAULT_OUTPUT_DIR = Path(os.environ.get('AISTOR_DIAG_OUTPUT_DIR', str(Path.home() / 'aistor-diag-output')))
-MAX_BYTES = 2 * 1024 * 1024
-MAX_LINES = 20000
+# 0.5.11: 입력 크기·줄 수·근거 블록 수·출력 합계·처리 시간 한도를 기본에서 없앤다(None = 한도 없음).
+# 대형 클러스터나 느린 서버에서 보고서를 못 만드는 일을 막기 위해서다. 값을 넣으면 이전처럼 그 한도를 건다.
+# 검사 항목 수(MAX_CHECKS)는 클러스터 크기와 무관한 공식 검사 목록이라 남긴다.
+MAX_BYTES = None
+MAX_LINES = None
 MAX_CHECKS = 1000
-MAX_BLOCKS = 2000
-MAX_OUTPUT_BYTES = 16 * 1024 * 1024
-MAX_PROCESS_SECONDS = 10
+MAX_BLOCKS = None
+MAX_OUTPUT_BYTES = None
+MAX_PROCESS_SECONDS = None
 KST = dt.timezone(dt.timedelta(hours=9))
 
 
@@ -74,40 +77,81 @@ def refuse_input_output_alias(out_dir, *sources):
             raise InputOutputCollision(label, '출력 폴더의 최신 결과 포인터(CURRENT.json)와 같은 파일(하드링크)')
 
 
+def over_limit(value, limit):
+    return limit is not None and value > limit
+
+
+def deadline_after(started, seconds):
+    return None if seconds is None else started + seconds
+
+
 def check_deadline(deadline):
-    if time.monotonic() > deadline:
+    if deadline is not None and time.monotonic() > deadline:
         raise InputError('processing time limit exceeded')
+
+
+def literal_union(words):
+    """0.5.11: 문자열 중 하나라도 들어 있는지 한 번에 찾는 정규식(접두어 트리). 만들 수 없으면 None."""
+    if not words:
+        return None
+    trie = {}
+    for word in words:
+        node = trie
+        for char in word:
+            if node.get('') is True:
+                break  # 더 짧은 원본이 이미 끝났다. 존재 여부만 보므로 긴 쪽은 필요 없다.
+            node = node.setdefault(char, {})
+        else:
+            node.clear()
+            node[''] = True
+
+    def build(node):
+        if node.get('') is True:
+            return ''
+        parts = []
+        for char in sorted(node):
+            child, text = node[char], re.escape(char)
+            while len(child) == 1 and child.get('') is not True:
+                (char, child), = child.items()
+                text += re.escape(char)
+            parts.append(text + build(child))
+        return parts[0] if len(parts) == 1 else '(?:' + '|'.join(parts) + ')'
+
+    try:
+        return re.compile(build(trie))
+    except (RecursionError, re.error, OverflowError):
+        return None
 
 
 # 입력 오류 안내. 키는 이 도구가 만든 고정 문구이며, 입력 내용·경로·원본 오류 본문은 출력하지 않는다.
 INPUT_ERROR_HINTS = {
     'recognized summary is required': '공식 진단 Markdown의 Summary 줄(Results: N passed, N error(s), N warning(s))을 찾지 못했습니다. mc가 만든 diag-report-*.md인지 확인하십시오.',
     'required check table missing': '오류·경고 수가 있는데 검사 표(Check/Status 열)를 찾지 못했습니다. 잘리거나 편집된 Markdown일 수 있습니다.',
-    'input limit exceeded': '공식 Markdown 크기·줄 수 제한(2 MiB, 20,000줄)을 넘었습니다.',
+    'input limit exceeded': '공식 Markdown 크기·줄 수 제한을 넘었습니다(기본은 한도 없음).',
     'check limit exceeded': '검사 항목 수 제한(1,000개)을 넘었습니다.',
     'detail limit exceeded': '상세 검사 절 수 제한(1,000개)을 넘었습니다.',
-    'block limit exceeded': '근거 블록 수 제한(2,000개)을 넘었습니다.',
-    'processing time limit exceeded': '처리 시간 제한(10초)을 넘었습니다.',
+    'block limit exceeded': '근거 블록 수 제한을 넘었습니다(기본은 한도 없음).',
+    'processing time limit exceeded': '처리 시간 제한을 넘었습니다(기본은 한도 없음).',
     'as-of must include timezone': '--as-of에는 시간대가 필요합니다. 예: 2026-10-12T09:00:00+09:00 또는 2026-10-12T00:00:00Z',
     'timezone-aware as-of required': '--as-of에는 시간대가 필요합니다. 예: 2026-10-12T09:00:00+09:00 또는 2026-10-12T00:00:00Z',
-    'Markdown limit': '공식 Markdown 크기 제한(2 MiB)을 넘었습니다.',
-    'gzip signature or compressed limit': 'gzip 파일이 아니거나 압축 크기 제한(32 MiB)을 넘었습니다. 공식 Markdown은 --official-report로 지정하십시오.',
-    'expanded size limit': '압축 해제 크기 제한(64 MiB)을 넘었습니다.',
+    'Markdown limit': '공식 Markdown 크기 제한을 넘었습니다(기본은 한도 없음).',
+    'gzip signature or compressed limit': 'gzip 파일이 아니거나 압축 파일 크기 제한(1 GiB)을 넘었습니다. 공식 Markdown은 --official-report로 지정하십시오.',
+    'expanded size limit': '압축 해제 크기 제한(1 GiB, 압축 폭탄 방어)을 넘었습니다.',
     'nesting limit': 'JSON 중첩 깊이 제한(64단계)을 넘었습니다.',
     'serialized string limit before decoding': 'JSON 문자열 길이 제한을 넘었습니다.',
     'scalar token limit before decoding': 'JSON 값 길이 제한을 넘었습니다.',
     'structural token limit before decoding': 'JSON 요소 수 제한을 넘었습니다.',
-    'resource limit': 'JSON 요소 수 또는 처리 시간 제한을 넘었습니다.',
+    'resource limit': 'JSON 요소 수 또는 처리 시간 제한을 넘었습니다(기본은 한도 없음).',
     'string limit': 'JSON 문자열 길이 제한(65,536자)을 넘었습니다.',
-    'processing time limit': '처리 시간 제한(10초)을 넘었습니다.',
+    'processing time limit': '처리 시간 제한을 넘었습니다(기본은 한도 없음).',
     'ambiguous document count': 'gzip 안의 JSON 문서가 3개 이상입니다(지원: 본문 1개 또는 머리말+본문 2개).',
     'unsupported document structure': 'gzip 안의 JSON 구조가 지원 형식(객체 1~2개)이 아닙니다.',
     'unsupported header structure': 'gzip 첫 JSON 문서가 머리말이 아니라 본문으로 보입니다(지원하지 않는 구조).',
     'duplicate JSON key': 'JSON에 중복 키가 있어 해석을 거부했습니다.',
     'invalid JSON value': 'JSON에 NaN·Infinity 같은 허용되지 않는 값이 있습니다.',
     'minimum server-array structure unavailable': '원본 gzip에 MinIO 서버 정보 배열(minio.info.servers)이 없습니다. mc 진단 원본(diag-data-*.json.gz)인지 확인하십시오.',
-    'server limit': '서버 기록 수 제한(1,000개)을 넘었습니다.',
-    'drive limit': '드라이브 기록 수 제한(100,000개)을 넘었습니다.',
+    'server limit': '서버 기록 수 제한을 넘었습니다(기본은 한도 없음).',
+    'drive limit': '드라이브 기록 수 제한을 넘었습니다(기본은 한도 없음).',
     'certificate limit': '인증서 기록 수 제한(1,000개)을 넘었습니다.',
     'invalid or limited diagnostic input': 'gzip 압축 또는 JSON 해석에 실패했습니다. 파일이 잘렸거나 손상되었을 수 있습니다.',
 }
@@ -567,16 +611,16 @@ def evidence_blocks(lines, start_line):
             block = {'type': kind, 'text': '\n'.join(content)}
         blocks.append(dict(block, section=section, source_locator={
             'input': 'input-001', 'line': start_line + begin, 'end_line': start_line + position - 1}))
-        if len(blocks) > MAX_BLOCKS:
+        if over_limit(len(blocks), MAX_BLOCKS):
             raise InputError('block limit exceeded')
     return blocks
 
 
 def parse_report(text):
-    deadline = time.monotonic() + MAX_PROCESS_SECONDS
+    deadline = deadline_after(time.monotonic(), MAX_PROCESS_SECONDS)
     text = text.lstrip('\ufeff').replace('\r\n', '\n').replace('\r', '\n')
     raw_lines = text.splitlines()
-    if len(text.encode('utf-8')) > MAX_BYTES or len(raw_lines) > MAX_LINES:
+    if over_limit(len(text.encode('utf-8')), MAX_BYTES) or over_limit(len(raw_lines), MAX_LINES):
         raise InputError('input limit exceeded')
     visible, fenced = [], False
     for n, line in enumerate(raw_lines, 1):
@@ -680,7 +724,7 @@ def parse_report(text):
         notes.append('unclosed fence')
     if any(c['official_status'] not in ('passed', 'error', 'warning') for c in checks):
         notes.append('unrecognized official status')
-    if sum(len(c['evidence_blocks']) for c in checks) > MAX_BLOCKS:
+    if over_limit(sum(len(c['evidence_blocks']) for c in checks), MAX_BLOCKS):
         raise InputError('block limit exceeded')
     check_deadline(deadline)
     return summary, collected, checks, sorted(set(notes))
@@ -1152,22 +1196,30 @@ class Masker:
         return masked
 
     # -- 사후 검증: 남으면 안 되는 형태 -------------------------------------------
+    def _alias_index(self):
+        # 별칭은 늘기만 하므로 개수가 바뀔 때만 다시 만든다.
+        count = len(self.aliases)
+        cached = getattr(self, '_alias_cache', None)
+        if cached is None or cached[0] != count:
+            tokens = frozenset(x for x in self.aliases if self.token.fullmatch(x))
+            others = [x for x in self.aliases if x not in tokens]
+            cached = (count, tokens, others, literal_union(others))
+            self._alias_cache = cached
+        return cached[1:]
+
     def leaks(self, text):
         """Return the kinds of sensitive shapes still present in already-masked text."""
         found = []
         if '-----BEGIN ' in text or '-----END ' in text:
             found.append('pem')
-        tokens = None
-        for original in self.aliases:
-            if self.token.fullmatch(original):
-                if tokens is None:
-                    tokens = {m.group(0).rstrip('.') for m in self.token.finditer(text)}
-                if original in tokens:
-                    found.append('alias')
-                    break
-            elif original in text:
-                found.append('alias')
-                break
+        # 0.5.11: 별칭 원본을 하나씩 대조하면 문자열 수 x 별칭 수라 큰 클러스터에서 제곱으로 느려진다.
+        # 같은 판정(낱말 모양 원본은 낱말 단위, 나머지는 부분 문자열)을 한 번에 찾는 색인으로 한다.
+        token_originals, other_originals, other_union = self._alias_index()
+        if token_originals and not token_originals.isdisjoint(m.group(0).rstrip('.') for m in self.token.finditer(text)):
+            found.append('alias')
+        elif other_originals and (other_union.search(text) if other_union is not None
+                                  else any(original in text for original in other_originals)):
+            found.append('alias')
         if self.secret_spans(text):
             found.append('secret')
         if self.mc_secret(text):
@@ -1522,12 +1574,12 @@ def model(text, mask='strict', as_of=None, parsed=None):
               'completeness': {'source_coverage': 'official_summary_and_provided_details', 'requested_scope_satisfied': not notes},
               'masking': {'level': mask, 'policy_version': 'r1-1', 'limitations': '자동 마스킹의 완전성을 보장하지 않습니다. 공유 전 수동 검토가 필요합니다.'}}
     # 0.5.6: 처리 시간 제한을 마스킹 도중에도 적용한다(이전에는 마스킹이 끝난 뒤에만 확인).
-    masker = Masker(mask, public_check_ids=explain, deadline=started + MAX_PROCESS_SECONDS)
+    masker = Masker(mask, public_check_ids=explain, deadline=deadline_after(started, MAX_PROCESS_SECONDS))
     report = masker.apply(report)
     masker.verify(report)
     # 0.5.4: 한글 해결방안은 입력과 무관한 고정 문구라 마스킹·검증 뒤에 붙인다(공식 판정·수치는 그대로).
     attach_resolution_ko(report)
-    if time.monotonic() - started > MAX_PROCESS_SECONDS:
+    if over_limit(time.monotonic() - started, MAX_PROCESS_SECONDS):
         raise InputError('processing time limit exceeded')
     return report
 
@@ -1951,9 +2003,9 @@ def save(report, out_dir, force=False, *, renderers=None):
         renderers = renderers or {'markdown': markdown, 'html': html_report}
         outputs = {'aistor-diag-report.json': json.dumps(report, ensure_ascii=False, separators=(',', ':')) + '\n',
                    'aistor-diag-report.md': renderers['markdown'](report), 'aistor-diag-report.html': renderers['html'](report)}
-        if sum(len(body.encode('utf-8')) for body in outputs.values()) > MAX_OUTPUT_BYTES:
+        if over_limit(sum(len(body.encode('utf-8')) for body in outputs.values()), MAX_OUTPUT_BYTES):
             raise OutputError('output size limit exceeded')
-        if time.monotonic() - started > MAX_PROCESS_SECONDS:
+        if over_limit(time.monotonic() - started, MAX_PROCESS_SECONDS):
             raise OutputError('rendering time limit exceeded')
         hashes = {}
         for name, body in outputs.items():
@@ -2012,11 +2064,11 @@ def main(argv=None, *, default_out_dir=None):
     if not args.official_report:
         parser.error('--official-report is required')
     try:
-        if args.official_report.stat().st_size > MAX_BYTES:
+        if over_limit(args.official_report.stat().st_size, MAX_BYTES):
             raise InputError('input limit exceeded')
         with args.official_report.open('rb') as stream:
-            data = stream.read(MAX_BYTES + 1)
-        if len(data) > MAX_BYTES:
+            data = stream.read() if MAX_BYTES is None else stream.read(MAX_BYTES + 1)
+        if over_limit(len(data), MAX_BYTES):
             raise InputError('input limit exceeded')
         text = data.decode('utf-8-sig')
         report = model(text, args.mask, args.as_of)

@@ -210,8 +210,10 @@ class R1Tests(unittest.TestCase):
             a.save(a.model(SYNTHETIC), root)
 
     def test_input_limit(self):
-        with self.assertRaises(a.InputError):
-            a.model('x' * (a.MAX_BYTES + 1))
+        # 0.5.11: 기본은 한도 없음. 값을 넣으면 이전처럼 거부한다.
+        self.assertIsNone(a.MAX_BYTES)
+        with patch.object(a, 'MAX_BYTES', 1024), self.assertRaises(a.InputError):
+            a.model('x' * 1025)
 
     def test_cli_codes_partial_and_error(self):
         root = self.private_root()
@@ -695,6 +697,7 @@ class Fix041Tests(unittest.TestCase):
 class Fix043Tests(unittest.TestCase):
     """0.4.3: 0.4.2 간소화 중 발견한 남은 항목."""
 
+    @patch.object(a, 'MAX_PROCESS_SECONDS', 10)
     def test_parse_deadline_checked_inside_loops(self):
         # 시한을 넘긴 뒤에는 다음 반복에서 바로 멈춰야 한다(근거 블록 파싱 등 이후 작업을 하지 않음).
         clock = [0.0]
@@ -806,6 +809,7 @@ class Fix056Tests(unittest.TestCase):
         a.model(report_with_detail('a.' * 32000))
         self.assertLess(a.time.monotonic() - started, 3.0)
 
+    @patch.object(a, 'MAX_PROCESS_SECONDS', 10)
     def test_deadline_enforced_during_masking(self):
         m = a.Masker('strict', deadline=a.time.monotonic() - 1)
         with self.assertRaises(a.InputError):
@@ -1107,6 +1111,54 @@ class Fix0510Tests(Fix059Tests):
             started = a.time.monotonic()
             a.Masker('strict').string(text)
             self.assertLess(a.time.monotonic() - started, 3.0, unit)
+
+
+class Fix0511Tests(unittest.TestCase):
+    """0.5.11: 입력 크기·처리 시간·출력 합계 한도를 기본에서 없앴다. 합성 값만 쓴다."""
+
+    def big_report(self, mib):
+        # 2 MiB·20,000줄을 넘는 상세(서버별 관측 줄 반복)를 만든다.
+        line = '| node-%06d.qz.example.com:9000 | drive /data%d ok | password=QZbig%06d |'
+        rows, size, i = [], 0, 0
+        while size < mib * 1024 * 1024:
+            row = line % (i, i % 16, i)
+            rows.append(row)
+            size += len(row) + 1
+            i += 1
+        return report_with_detail('| Server | Value | Note |' + chr(10) + '|---|---|---|' + chr(10) + chr(10).join(rows))
+
+    def test_defaults_have_no_size_or_time_limit(self):
+        for name in ('MAX_BYTES', 'MAX_LINES', 'MAX_BLOCKS', 'MAX_OUTPUT_BYTES', 'MAX_PROCESS_SECONDS'):
+            self.assertIsNone(getattr(a, name), name)
+        self.assertEqual(a.MAX_CHECKS, 1000)
+
+    def test_large_report_saved_through_cli(self):
+        text = self.big_report(3)
+        self.assertGreater(len(text.encode('utf-8')), 2 * 1024 * 1024)
+        self.assertGreater(text.count(chr(10)), 20000)
+        root = R1Tests.private_root(self)
+        src = root / 'big.md'
+        src.write_text(text, encoding='utf-8')
+        try:
+            a.secure_dir(root)
+            protected = True
+        except a.OutputError:
+            protected = False
+        with contextlib.redirect_stderr(StringIO()), contextlib.redirect_stdout(StringIO()):
+            rc = a.main(['--official-report', str(src), '--out-dir', str(root / 'reports')])
+        if not protected:
+            self.skipTest('protected-storage integration blocked: backend owner/mode cannot be verified')
+        self.assertEqual(rc, 0)
+        pointer = json.loads((root / 'reports/CURRENT.json').read_text(encoding='utf-8'))
+        body = (root / 'reports' / pointer['generation'] / 'aistor-diag-report.md').read_text(encoding='utf-8')
+        self.assertNotIn('QZbig', body)
+        self.assertNotIn('qz.example.com', body)
+
+    def test_limits_still_apply_when_set(self):
+        with patch.object(a, 'MAX_LINES', 10), self.assertRaises(a.InputError):
+            a.model(self.big_report(0.01))
+        with patch.object(a, 'MAX_PROCESS_SECONDS', 0), self.assertRaises(a.InputError):
+            a.model(SYNTHETIC)
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
