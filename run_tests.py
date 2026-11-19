@@ -989,5 +989,61 @@ class Fix058Tests(unittest.TestCase):
             self.assertLess(a.time.monotonic() - started, 3.0, unit)
 
 
+
+class Fix059Tests(unittest.TestCase):
+    """0.5.9: Shield 0.5.8 재점검 R1(16진수 글자로 끝나는 이름표 뒤 IPv6)·R2(mc alias 위치 인자 키)·R3. 모두 합성 값."""
+
+    LABELS = ('src', 'remote', 'source', 'interface', 'id', 'peer_id', 'bind', 'grid', 'advertise', 'ipv6', 'ip6', 'IPv6',
+              'node', 'IP Address', 'addr')
+
+    def bodies(self, line, level='strict'):
+        r = a.model(report_with_detail(line), level)
+        return {'json': json.dumps(r, ensure_ascii=False), 'md': a.markdown(r), 'html': a.html_report(r)}
+
+    def assert_hidden(self, line, needles, levels=('strict', 'basic')):
+        for level in levels:
+            for fmt, body in self.bodies(line, level).items():
+                for needle in needles:
+                    self.assertNotIn(needle, body, (line, level, fmt))
+
+    def test_ipv6_after_any_label_masked(self):
+        for label in self.LABELS:
+            for line in ('%s:fd00:abcd::1234 ok' % label, 'peer %s:2001:db8:0:1::7, next' % label):
+                with self.subTest(line=line):
+                    self.assert_hidden(line, ('fd00', '2001:db8'))
+                    self.assertIn('ipv6', a.Masker('strict').leaks(line))
+        # IPv6가 아닌 콜론 값은 그대로 둔다.
+        for kept in ('started 12:30:45 ok', 'sha256:abcdef'):
+            self.assertIn(kept, self.bodies(kept)['json'])
+
+    def test_mc_alias_positional_keys_masked(self):
+        cases = ('mc alias set qzalias http://10.0.0.1:9000 QZAKr2a01 QZSKr2b01',
+                 'run: mc alias set qzalias https://minio.qz.co.kr:9000 "QZAKr2a02" "QZSKr2b02" --api S3v4',
+                 'mc config host add qzalias http://10.0.0.1:9000 QZAKr2a03 QZSKr2b03',
+                 'mc --insecure alias set qzalias http://10.0.0.1:9000 QZAKr2a04 QZSKr2b04',
+                 'mc.exe alias set qzalias http://x:9000 QZAKr2a05 QZSKr2b05')
+        for line in cases:
+            with self.subTest(line=line):
+                self.assert_hidden(line, ('QZAKr2', 'QZSKr2'))
+                self.assertIn('secret', a.Masker('strict').leaks(line))
+        # 문서 예시 자리표시자는 그대로 둔다.
+        self.assertIn('<ACCESS_KEY>', self.bodies('mc alias set myminio http://x:9000 <ACCESS_KEY> <SECRET_KEY>')['json'])
+
+    def test_r3_shapes_masked(self):
+        for line, needle in (('"password": "QZr3a01', 'QZr3a01'), ("'secret': 'QZr3a02 trailing", 'QZr3a02'),
+                             ('password: "QZr3a03 more', 'QZr3a03'), ('pass: 1234 ok', '1234'), ('PASS: 9999 chars', '9999'),
+                             ('mac 52:54:00:aa:bb:c1-1 up', '52:54:00'), ('52-54-00-aa-bb-c2-2 down', '52-54-00')):
+            with self.subTest(line=line):
+                self.assert_hidden(line, (needle,))
+        self.assertIn('pass: 12 checks', self.bodies('pass: 12 checks')['md'])
+        self.assertEqual(a.Masker('strict').leaks(a.Masker('strict').string('"password": "QZr3a01')), [])
+
+    def test_new_rules_linear(self):
+        for unit in ('id:fd00::1 ', 'a:', 'mc alias set a b ', 'mc -q ', 'aa-bb-cc-dd-ee-ff-1 ', '"password": "x ', 'x_:'):
+            text = unit * (262144 // len(unit))
+            started = a.time.monotonic()
+            a.Masker('strict').string(text)
+            self.assertLess(a.time.monotonic() - started, 3.0, unit)
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
