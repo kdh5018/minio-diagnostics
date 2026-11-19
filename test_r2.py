@@ -914,6 +914,93 @@ def card_texts(page):
     return re.findall(r'<article class="card.*?</article>', page, flags=re.S)
 
 
+class Review054Tests(unittest.TestCase):
+    """0.5.4: 공식 오류·경고 카드에 한글 해결방안(정적 사전)을 공식 판정 바로 아래에 두고, 영문 원문은 접어서 남긴다."""
+
+    def setUp(self):
+        line, checks, _ = Replay050Tests.CASES['1116']
+        md = replay_md(line, checks).replace('### 3. THP (warning)\n', '### 3. THP (warning)\n**Resolution:**\nSet THP to madvise.\n**Info:**\n', 1)
+        self.r = h.report(body_201(), 1, md)
+        self.page, self.md = h.html_report(self.r), h.markdown_report(self.r)
+        self.cards = card_texts(self.page)
+
+    def official(self, cid):
+        return next(f for f in self.r['findings'] if f.get('source_check_id') == cid)
+
+    def test_official_buttons_unchanged(self):
+        bar = re.search(r'<div class="sevbtns".*?</div>', self.page).group(0)
+        b = {k: int(n) for k, n in re.findall(r'data-sev="([^"]*)"[^>]*>(?:<span[^>]*>[^<]*</span>)?[^<]*?(\d+)', bar)}
+        self.assertEqual(self.r['official_summary'], {'passed': 32, 'errors': 2, 'warnings': 1})
+        self.assertEqual((b['error'], b['warning']), (2, 1))
+        self.assertEqual(len(re.findall(r'data-sev="warning"', self.page)), 2)  # 상자는 data-sev를 늘리지 않음
+        self.assertEqual(len(self.cards), 4)
+
+    def test_korean_box_on_error_and_warning_cards_after_official_verdict(self):
+        for cid in ('minio.cluster.min', 'sys.mem.iommu', 'sys.mem.thp'):
+            f = self.official(cid)
+            self.assertEqual(f['resolution_ko']['status'], 'registered')
+            card = next(c for c in self.cards if 'data-status="%s"' % f['official_status'] in c and esc_title(f['title']) in c)
+            self.assertEqual(card.count('해결방안(한글)'), 1)
+            self.assertLess(card.index('공식 판정 <small>'), card.index('해결방안(한글)'))
+            self.assertLess(card.index('해결방안(한글)'), card.index('이 도구의 해설'))
+        iommu = next(c for c in self.cards if '자체 점검 보조 정보: 명시적 IOMMU' in c)
+        self.assertIn('grubby --update-kernel=ALL --args=&quot;iommu=pt&quot;', iommu)
+        self.assertIn('cat /proc/cmdline', iommu)
+        self.assertLess(iommu.index('해결방안(한글)'), iommu.index('자체 점검 보조 정보'))
+        thp = next(c for c in self.cards if '자체 점검 보조 정보: THP' in c)
+        self.assertIn('일시 적용', thp)
+        self.assertIn('영구 적용', thp)
+        self.assertIn('tuned-adm profile minio-thp', thp)
+        own = next(c for c in self.cards if '설정 변경 대상이 아니라' in c)
+        self.assertNotIn('해결방안(한글)', own)  # 자체 점검 카드에는 붙이지 않음
+
+    def test_english_resolution_collapsed(self):
+        thp = next(c for c in self.cards if '자체 점검 보조 정보: THP' in c)
+        self.assertIn('<details class="res-en"><summary>공식 조치 안내(Resolution, 마스킹, 영문 원문)</summary>', thp)
+        self.assertIn('Set THP to madvise.', thp)
+        self.assertNotIn('<details open', self.page)
+        self.assertLess(thp.index('해결방안(한글)'), thp.index('영문 원문'))
+
+    def test_unregistered_and_passed_and_custom(self):
+        self.assertEqual(a.resolution_ko('no.such.check')['status'], 'not_registered')
+        self.assertEqual(a.resolution_ko('sys.mem.thp', passed=True)['status'], 'not_applicable')
+        md = replay_md('0 passed, 1 errors, 0 warnings', [('no.such.check', 'Unknown', 'error')])
+        page = a.html_report(a.model(md))
+        self.assertIn('한글 해결방안 미등록 — 아래 공식 원문 참고', page)
+        self.assertIn('한글 해결방안 미등록 — 아래 공식 원문 참고', a.markdown(a.model(md)))
+        for f in self.r['findings']:
+            if f.get('origin') == 'custom_rule':
+                self.assertEqual(f['resolution_ko']['status'], 'not_applicable')
+
+    def test_dictionary_covers_known_checks(self):
+        known = {cid for case in Replay050Tests.CASES.values() for cid, _, _ in case[1]}
+        known |= {'minio.process.rlimit', 'sys.drive.status', 'sys.fs.supported'}  # 201 수집본에서 실패로 관측된 검사
+        self.assertFalse(known - set(a.RESOLUTION_KO))
+        self.assertEqual(len(a.RESOLUTION_KO), 58)  # mc RELEASE.2026-07-24T01-15-12Z 내장 공식 안내 전체
+        for cid, entry in a.RESOLUTION_KO.items():
+            text = ' '.join(b if isinstance(b, str) else b[1] for b in entry)
+            self.assertNotIn('update-grub', text.replace('update-grub 은', ''), cid)  # el 계열 명령만 안내
+            self.assertTrue(re.search(r'[가-힣]', text), cid)
+
+    def test_json_markdown_schema(self):
+        self.assertEqual(self.r['schema_version'], '1.4-r2')
+        self.assertEqual(a.SCHEMA_VERSION, '1.2-r1')
+        self.assertEqual(self.r['policy']['resolution_ko_version'], a.RESOLUTION_KO_VERSION)
+        f = self.official('sys.mem.iommu')
+        self.assertTrue(any(b['type'] == 'code' and 'grubby' in b['text'] for b in f['resolution_ko']['blocks']))
+        self.assertEqual(self.md.count('### 해결방안(한글)'), 3)
+        self.assertIn('grubby --update-kernel=ALL', self.md)
+        json.dumps(self.r, ensure_ascii=False)
+        r1 = a.model(replay_md('32 passed, 2 errors, 1 warning', Replay050Tests.CASES['1116'][1]))
+        self.assertEqual(r1['schema_version'], '1.2-r1')
+        self.assertEqual(sum(f['resolution_ko']['status'] == 'registered' for f in r1['findings']), 3)
+
+
+def esc_title(title):
+    import html as _html
+    return _html.escape(title, quote=True)
+
+
 class Review053Tests(unittest.TestCase):
     """0.5.3: 검사 결과 목록의 공식 숫자는 mc 요약과 같고, 자체 점검은 따로 센다."""
 

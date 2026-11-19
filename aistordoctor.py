@@ -18,8 +18,8 @@ import sys
 import time
 import uuid
 
-VERSION = '0.5.3-r1'
-SCHEMA_VERSION = '1.1-r1'
+VERSION = '0.5.4-r1'
+SCHEMA_VERSION = '1.2-r1'
 PARSER_VERSION = 'official-markdown-r1-2'
 POLICY_VERSION = 'r1-1'
 DEFAULT_OUTPUT_DIR = Path(os.environ.get('AISTOR_DIAG_OUTPUT_DIR', str(Path.home() / 'minio-airgap-diag-output')))
@@ -765,6 +765,240 @@ class Masker:
                 raise OutputError('secret verification failed')
 
 
+# --- 한글 해결방안(0.5.4) ------------------------------------------------------
+# mc 공식 검사 ID별 정적 사전. 근거는 mc RELEASE.2026-07-24T01-15-12Z 바이너리에 내장된 공식 조치 안내(docs/<검사 ID>.md)이며,
+# 보고서의 Resolution 원문과 같은 글이다. 실행 중 번역·네트워크 사용은 하지 않는다.
+# 대상 OS가 RHEL·Rocky·AlmaLinux(el 계열)이므로 원문의 Debian 계열 명령은 el 계열 명령으로 바꾸고, 원문에 없는 조치·수치는 넣지 않는다.
+# 입력과 무관한 고정 문구이므로 마스킹 대상이 아니다(마스킹·검증이 끝난 뒤 붙인다).
+RESOLUTION_KO_VERSION = 'ko-res-1'
+RESOLUTION_KO_BASIS = 'mc 공식 조치 안내(Resolution) 번역, el 계열(RHEL·Rocky·AlmaLinux) 명령으로 보완'
+RESOLUTION_KO_FOOTER = ('설정·하드웨어 변경은 영향을 확인한 뒤 별도 승인을 받아 수행하십시오. 이 도구는 아무것도 변경하지 않습니다. '
+                        '조치 후 진단을 다시 수집해 이 검사 결과를 확인하십시오. 근거 원문은 아래 "공식 조치 안내(Resolution, 마스킹)"에 있습니다.')
+RESOLUTION_KO_MISSING = '한글 해결방안 미등록 — 아래 공식 원문 참고'
+
+
+def _code(text):
+    return ('code', text)
+
+
+_REPL_CHECK = ('MinIO 서버 로그에서 복제 오류를 확인하고, 원본(source) 사이트에서 다른 사이트로 연결되는지 점검하십시오.',
+               '문서를 참고하거나 SUBNET 티켓으로 안내를 받으십시오.')
+_REPL_PENDING = ('복제가 자동으로 동기화합니다. 동기화되지 않으면 문서를 참고하거나 SUBNET 티켓으로 안내를 받으십시오.',)
+_INODES = ('OS 도구로 inode 사용량이 시스템 한도를 넘게 늘어난 파일 경로를 찾으십시오(예: df -i 로 드라이브별 inode 사용률 확인).',
+           'EXT4 드라이브의 inode 고갈은 파일시스템 특성이라 장기적으로는 보통 XFS로 다시 포맷해야 합니다. '
+           '파일시스템 전환은 MinIO 드라이브 교체 절차(https://docs.min.io/enterprise/aistor-object-store/operations/failure-and-recovery/recover-after-drive-failure/)를 기준으로 하십시오.')
+
+RESOLUTION_KO = {
+    'minio.cluster.min': (
+        '운영 권장 기준인 "server pool당 최소 8노드"를 충족하는 구성으로 이전(확장)하는 계획을 세우십시오.',
+        '검사 메시지의 "권장 4대"는 이 검사의 판정 기준이고, 8노드는 공식 조치 안내의 운영 권고입니다.',
+        '참고 문서: https://docs.min.io/enterprise/aistor-object-store/reference/aistor-server/requirements/'),
+    'minio.cluster.node.tolerance': (
+        '각 erasure set에서 Erasure Coding 패리티를 노드당 드라이브 수 이상으로 높이십시오.',
+        '참고 문서: https://docs.min.io/enterprise/aistor-object-store/operations/core-concepts/erasure-coding/ (또는 SUBNET 이슈로 안내 요청)'),
+    'minio.config.threshold': (
+        '설정값을 확인해 지원 범위 안의 값으로 바꾸십시오. 문서를 참고하거나 SUBNET 티켓으로 안내를 받으십시오.',),
+    'minio.buckets.max': (
+        '애플리케이션 구조와 로직을 점검해 버킷이 과도하게 만들어지지 않도록 하십시오.',
+        '최상위 버킷을 많이 만드는 대신 prefix(접두사)를 쓰는 구조를 검토하십시오.'),
+    'minio.buckets.quota': (
+        '버킷 사용량을 검토해 불필요한 데이터를 정리하거나, 증가가 정상이면 버킷 quota 한도를 늘리십시오.',
+        '용량 계획 지원은 SUBNET 이슈로 엔지니어링과 상의하십시오.'),
+    'minio.license.consistency': (
+        '모든 서버에 같은 라이선스가 설치되어 있도록 맞추십시오.',),
+    'minio.license.expiry': (
+        '구독을 갱신하고 SUBNET에서 새 라이선스를 내려받아 클러스터에 설치하십시오.',
+        '문의 사항은 SUBNET 이슈로 엔지니어링과 상의하십시오.'),
+    'minio.net.latency': (
+        '노드 간 네트워크를 점검하고 스위치·라우터 등 연결 장비와 관련 소프트웨어가 정상 동작하는지 확인하십시오.',),
+    'minio.net.tls.algo': (
+        'MinIO TLS 인증서를 ECDSA 또는 Ed25519 알고리즘으로 생성하면 연결당 성능이 좋아집니다.',
+        '권장 알고리즘·암호 스위트: https://docs.min.io/enterprise/aistor-object-store/installation/linux/network-encryption/#recommendations-for-generating-certificates'),
+    'minio.net.tls.status': (
+        '배포에 TLS 암호화를 활성화하십시오.',
+        '참고 문서: https://docs.min.io/enterprise/aistor-object-store/installation/linux/network-encryption/'),
+    'minio.net.tls.valid': (
+        'TLS 인증서를 유효한(정상 동작이 확인된) 인증서·키로 교체하십시오.',
+        '교체 전후 인증서의 유효 기간은 다음처럼 읽기 전용으로 확인할 수 있습니다.',
+        _code('openssl x509 -noout -subject -dates -in <인증서 파일>')),
+    'minio.process.args': (
+        '/etc/default/minio 파일의 MINIO_OPTS 값이 pool 안 모든 MinIO 노드에서 같은지 확인하십시오.',
+        '환경 파일 없이 MinIO를 시작하는 경우에는 시작 스크립트·실행 인자가 모든 노드에서 같은지 확인하십시오.'),
+    'minio.process.rlimit': (
+        'OS의 rlimit-max(MinIO 프로세스의 열린 파일 수 상한) 설정을 최소 65000 이상 허용하도록 바꾸십시오.',
+        'el 계열에서 systemd로 실행하면 서비스 유닛의 LimitNOFILE 값으로 정합니다(systemctl edit minio 에서 [Service] 아래 LimitNOFILE= 지정 → '
+        'systemctl daemon-reload → MinIO 재시작). systemd 밖에서 실행하면 /etc/security/limits.conf 의 nofile 값을 확인하십시오.',
+        '적용 값 확인: cat /proc/<MinIO PID>/limits 의 "Max open files" 줄. 컨테이너(쿠버네티스)로 실행하면 노드·컨테이너 런타임의 제한 설정을 확인하십시오.'),
+    'minio.process.user': (
+        'systemctl로 관리하는 배포는 minio 서버 프로세스를 실행하는 User를 root가 아닌 계정으로 바꾸십시오.',
+        '현재 값은 systemctl cat minio 출력의 User= 줄로 확인합니다. '
+        '참고 절차(Deploy MinIO): https://docs.min.io/enterprise/aistor-object-store/installation/linux/install/'),
+    'minio.version.consistency': (
+        '표시된 노드의 MinIO 서버 버전을 올려 모든 노드의 버전을 같게 맞추십시오.',
+        '참고 절차: https://docs.min.io/enterprise/aistor-object-store/upgrade-aistor-server/upgrade-aistor-linux/'),
+    **{'minio.repl.' + k: _REPL_CHECK for k in (
+        'bkt.cfg.mismatch', 'bkt.cors_cfg.mismatch', 'bkt.olock.mismatch', 'bkt.policy.mismatch', 'bkt.quota_cfg.mismatch',
+        'bkt.sse_cfg.mismatch', 'bkt.tags.mismatch', 'bkt.targets.offline', 'bkt.ver_cfg.mismatch', 'sites.offline')},
+    **{'minio.repl.' + k: _REPL_PENDING for k in (
+        'bkts.pending', 'group.policy.mismatch', 'groups.pending', 'policies.pending', 'user.policy.mismatch', 'users.pending')},
+    'minio.repl.errors': (
+        'MinIO 서버 로그에서 오류 상세를 확인하십시오. 문서를 참고하거나 SUBNET 티켓으로 안내를 받으십시오.',),
+    'minio.repl.retries': (
+        'MinIO 서버 로그에서 복제 오류가 있는지 확인하십시오. 문서를 참고하거나 SUBNET 티켓으로 안내를 받으십시오.',),
+    'minio.repl.ilm.pending': (
+        '사이트 복제 설정을 수정해 ILM 만료(Expiry) 규칙 복제를 활성화하십시오.',
+        _code('mc admin replicate update ALIAS --enable-ilm-expiry-replication')),
+    'sys.cpu.consistency': (
+        '표시된 노드의 CPU를 확인하고, 가능할 때 pool 안 모든 노드가 같은 제조사·모델의 CPU를 쓰도록 교체하십시오.',),
+    'sys.cpu.cores.min': (
+        '표시된 노드의 CPU를 확인하고, 가능할 때 pool 안 모든 노드가 최소 8코어 이상인 같은 CPU를 쓰도록 교체하십시오.',),
+    'sys.cpu.extensions': (
+        '해당 pool 노드의 CPU를 다음 성능 기능을 지원하는 CPU로 교체하는 계획을 검토하십시오.',
+        'ARM: asimd, aes / 그 외(x86 등): avx, avx2, aes, bmi1, bmi2, movbe',
+        '지원 여부는 lscpu 출력의 Flags 항목에서 확인할 수 있습니다.'),
+    'sys.cpu.governor': (
+        '표시된 노드의 CPU 설정을 확인해 performance(또는 그와 비슷한) CPU governor를 쓰도록 하십시오.',
+        'el 계열 확인: cpupower frequency-info (kernel-tools 패키지). 설정 예: cpupower frequency-set -g performance '
+        '또는 tuned 프로필(throughput-performance 등). tuned 프로필은 다른 커널 설정도 함께 바꾸므로 영향을 확인한 뒤 적용하십시오.'),
+    'sys.cpu.hyperthreading': (
+        '성능을 위해 CPU 하이퍼스레딩(SMT)을 끄십시오.',
+        _code('echo off | sudo tee /sys/devices/system/cpu/smt/control'),
+        '위 명령은 즉시 적용되지만 재부팅하면 원래대로 돌아갑니다. 영구 적용은 BIOS(펌웨어) 설정 등 운영 표준 방법으로 정하십시오.',
+        '문의 사항은 SUBNET 이슈로 엔지니어링과 상의하십시오.'),
+    'sys.drive.consistency': (
+        '아키텍처를 검토해 최소한 pool 안 모든 노드의 드라이브 개수와 용량이 같도록 하십시오.',
+        '제조사가 서로 다른 드라이브 SKU의 성능·동작 특성이 같거나 비슷하다고 보면 이 경고는 무시해도 됩니다. '
+        '그렇지 않으면 드라이브 교체 절차(https://docs.min.io/enterprise/aistor-object-store/operations/failure-and-recovery/recover-after-drive-failure/)로 '
+        '드라이브 단위 교체를 계획해 pool 전체 구성을 맞추십시오.'),
+    'sys.drive.mount': (
+        '/etc/fstab 에서 /dev/sdb1, /dev/nvme0n1p1 같은 장치 경로(재부팅 후 바뀔 수 있음) 대신 고정 식별자를 쓰십시오.',
+        'blkid /dev/sdX 로 UUID를 확인한 뒤 장치 경로를 UUID=<uuid> 로 바꿉니다. LABEL=, PARTUUID=, /dev/disk/by-id/ 도 쓸 수 있습니다.',
+        '운영 중인 배포는 유지보수 시간에 한 노드씩 바꾸십시오. el 계열은 fstab 수정 후 findmnt --verify 로 문법을 확인하고 systemctl daemon-reload 로 반영합니다. '
+        '문의 사항은 SUBNET 이슈로 상의하십시오.'),
+    'sys.drive.status': (
+        'hdparm, smartctl 같은 OS 드라이브 도구로 표시된 노드의 고장 드라이브를 찾고, MinIO 드라이브 교체 절차'
+        '(https://docs.min.io/enterprise/aistor-object-store/operations/failure-and-recovery/recover-after-drive-failure/)에 따라 교체 일정을 잡으십시오.',
+        'el 계열: smartctl 은 smartmontools 패키지, hdparm 은 hdparm 패키지에 있습니다(예: smartctl -a /dev/<장치>).',
+        '소프트웨어 복구 도구로 단기 해결이 되더라도 해당 하드웨어의 교체 계획은 세워야 합니다.'),
+    'sys.drive.usage': (
+        '단기: mc du, mc ls --versions 로 객체를 직접 지울 수 있는 버킷·prefix를 찾아 공간을 확보하십시오(예: 오래된 noncurrent 객체 버전 삭제).',
+        '장기: 첫 pool 용량의 최소 2~3배인 새 server pool로 클러스터 확장을 계획하십시오. 계획·구현 지원은 SUBNET 이슈로 받을 수 있습니다.'),
+    'sys.fs.consistency': (
+        '표시된 노드의 /etc/fstab 에서 모든 MinIO 드라이브의 마운트 옵션이 같은지 확인하십시오.',
+        '현재 적용된 옵션 확인: findmnt -o TARGET,FSTYPE,OPTIONS'),
+    'sys.fs.inodes.free': _INODES,
+    'sys.fs.inodes.usage': _INODES,
+    'sys.fs.supported': (
+        '신규 배포: 표시된 드라이브를 xfs(Windows는 ntfs)로 다시 포맷하십시오.',
+        '운영 중인 배포: 한 번에 드라이브 하나씩 다시 포맷하고 healing이 끝나기를 기다리는 방식으로 모든 드라이브를 권장 파일시스템으로 바꾸십시오. '
+        '진행 전에 SUBNET 이슈로 엔지니어링과 상의하십시오.',
+        '현재 파일시스템 확인: lsblk -f 또는 df -T'),
+    'sys.fs.xfs.errors': (
+        'MinIO는 모든 드라이브에서 XFS retry-on-error(오류 시 재시도) 동작을 끄도록 강력히 권장합니다.',
+        '설정 방법은 MinIO 문서(https://docs.min.io/enterprise/aistor-object-store/reference/aistor-server/requirements/storage/#xfs-configuration-and-guidance)와 '
+        '커널 문서(https://docs.kernel.org/admin-guide/xfs.html#error-handling)를 따르십시오.'),
+    'sys.mem.consistency': (
+        '표시된 노드의 하드웨어 구성을 바꿔 pool 안 모든 노드의 시스템 메모리 양을 같게 맞추십시오.',),
+    'sys.mem.iommu': (
+        '부팅 옵션에 iommu=pt(IOMMU passthrough)가 있어야 합니다. 확인: cat /proc/cmdline 출력에 iommu=pt 가 있는지 봅니다.',
+        'el 계열(RHEL·Rocky·AlmaLinux 8/9/10) 적용: 공식 원문의 update-grub 은 Debian·Ubuntu 명령이므로 쓰지 않고 grubby 로 모든 커널 항목에 추가합니다(root 권한).',
+        _code('grubby --update-kernel=ALL --args="iommu=pt"\ngrubby --info=ALL | grep -E "^(kernel|args)="'),
+        '/etc/default/grub 의 GRUB_CMDLINE_LINUX 에도 iommu=pt 가 들어갔는지 확인하고, 없으면 추가하십시오. '
+        'grub2-mkconfig 로 GRUB 설정을 다시 만드는 경우 이 값이 쓰이며, 출력 경로는 el 버전·부팅 방식(BIOS/UEFI)에 따라 다릅니다(예: BIOS는 /boot/grub2/grub.cfg).',
+        '공식 원문의 EFI 방식(커널 명령줄 파일을 쓰는 경우): /etc/kernel/cmdline 에 iommu=pt 를 추가합니다.',
+        '대안(공식 원문): iommu=pt 대신 CPU별 IOMMU를 끕니다. Intel은 intel_iommu=off, AMD는 amd_iommu=off.',
+        '부팅 옵션은 재부팅해야 적용됩니다. 재부팅 후 cat /proc/cmdline 에 값이 있는지 확인하십시오. '
+        '재부팅에 따른 서비스 영향(동시에 재부팅하는 노드 수)을 검토해 일정을 정하고, 쿠버네티스 등 컨테이너 환경이면 파드가 아니라 각 노드(호스트)에 적용합니다.'),
+    'sys.mem.swap': (
+        '표시된 노드의 swap을 끄십시오.',
+        '일시 적용(현재 부팅에만, 재부팅하면 다시 켜짐):',
+        _code('swapoff -a'),
+        '영구 적용: /etc/fstab 에서 swap 항목을 지워(또는 주석 처리) 재부팅 후에도 꺼지게 합니다. 확인: swapon --show 출력이 비어 있으면 꺼진 상태입니다.'),
+    'sys.mem.thp': (
+        '권장값: enabled=madvise, defrag=defer+madvise 또는 madvise, khugepaged/max_ptes_none=0',
+        '현재 값 확인:',
+        _code('cat /sys/kernel/mm/transparent_hugepage/enabled\ncat /sys/kernel/mm/transparent_hugepage/defrag\n'
+              'cat /sys/kernel/mm/transparent_hugepage/khugepaged/max_ptes_none'),
+        '일시 적용(즉시 반영, 재부팅하면 원래 값으로 돌아감, root 권한, 공식 원문 명령):',
+        _code('echo "madvise" > /sys/kernel/mm/transparent_hugepage/enabled\n'
+              'echo "defer+madvise" > /sys/kernel/mm/transparent_hugepage/defrag\n'
+              'echo "0" > /sys/kernel/mm/transparent_hugepage/khugepaged/max_ptes_none'),
+        '영구 적용(재부팅 후에도 유지): el 계열은 tuned 사용자 프로필로 세 값을 함께 지정할 수 있습니다. '
+        '<현재 프로필>에는 tuned-adm active 로 확인한 이름을 넣습니다.',
+        _code('mkdir -p /etc/tuned/minio-thp\ncat > /etc/tuned/minio-thp/tuned.conf <<\'EOF\'\n[main]\ninclude=<현재 프로필>\n\n[sysfs]\n'
+              '/sys/kernel/mm/transparent_hugepage/enabled=madvise\n/sys/kernel/mm/transparent_hugepage/defrag=defer+madvise\n'
+              '/sys/kernel/mm/transparent_hugepage/khugepaged/max_ptes_none=0\nEOF\ntuned-adm profile minio-thp'),
+        'tuned를 쓰지 않는 서버는 부팅 때 같은 세 값을 쓰는 방법(예: systemd 서비스)을 운영 표준에 따라 정하십시오. '
+        'enabled 값만은 커널 부팅 옵션(grubby --update-kernel=ALL --args="transparent_hugepage=madvise")으로도 지정할 수 있습니다.',
+        '적용 후 재부팅하고 위 확인 명령으로 세 값이 유지되는지 확인하십시오. 쿠버네티스 등 컨테이너 환경이면 파드가 아니라 각 노드(호스트)에 적용합니다.',
+        '참고 문서: https://tip.golang.org/doc/gc-guide#Linux_transparent_huge_pages'),
+    'sys.net.eth.buffer': (
+        'NIC의 rx/tx 링 버퍼가 하드웨어 최대치보다 낮게 설정되지 않도록 하십시오.',
+        '확인: ethtool -g <인터페이스> 에서 "Pre-set maximums"와 "Current hardware settings"를 비교합니다.',
+        '일시 적용 예(공식 원문 스크립트, jq 필요. jq가 없으면 인터페이스 이름을 직접 지정):',
+        _code('for i in $(ip -p -j a | jq -r .[].ifname); do\n    sudo ethtool -G $i rx <max-rx> tx <max-tx>\ndone'),
+        'ethtool -G 값은 재부팅 후 유지되지 않습니다. el 계열 NetworkManager 환경의 영구 적용 예: '
+        'nmcli connection modify <연결 이름> ethtool.ring-rx <max-rx> ethtool.ring-tx <max-tx> 후 연결을 다시 활성화(nmcli connection up <연결 이름>).'),
+    'sys.os.config': (
+        '목록에 표시된 서비스를 server pool의 모든 노드에서 꺼서 MinIO가 계산·저장 자원을 다른 서비스와 경쟁하지 않게 하십시오.',
+        'el 계열: systemctl disable --now <서비스 이름>'),
+    'sys.os.consistency': (
+        '표시된 노드의 호스트 OS를 갱신해 pool 안 모든 노드의 구성이 같도록 하십시오.',),
+    'sys.os.kernel.min': (
+        '모든 MinIO 노드를 지원 기간이 끝나지 않은(non-EOL) 같은 LTS 커널로 올리십시오.',
+        'el 계열은 배포판이 제공·지원하는 커널(dnf 로 kernel 패키지 갱신 후 재부팅)을 모든 노드에 같은 버전으로 맞춥니다. 확인: uname -r'),
+    'sys.os.kernel.unstable': (
+        '커널을 6.1.66-1 이상으로 올리십시오(공식 원문의 근거는 Debian 버그 1057843).',
+        '가장 이른 기회에 드라이브를 XFS로 전환하는 계획을 세우십시오.',
+        'el 계열 커널은 버전 번호 체계가 달라 6.1.66-1 과 직접 비교되지 않습니다. el 서버에서 이 검사가 나오면 공식 원문과 SUBNET으로 해당 여부를 확인하십시오.'),
+    'sys.os.ntp': (
+        'pool 안 모든 서버에서 NTP(시간 동기화)가 켜져 있고 동기화되어 있는지 확인하십시오.',
+        'el 계열(chrony): timedatectl 의 "System clock synchronized: yes", chronyc tracking 으로 확인합니다. 꺼져 있으면 systemctl enable --now chronyd'),
+}
+
+
+def resolution_ko(check_id, passed=False):
+    """Static Korean resolution for an official check (0.5.4). Passed checks need no action, so none is attached."""
+    if passed:
+        return {'status': 'not_applicable', 'reason': 'official_check_passed', 'blocks': []}
+    entry = RESOLUTION_KO.get(check_id)
+    if entry is None:
+        return {'status': 'not_registered', 'reason': 'no_korean_resolution_for_check', 'blocks': [], 'message': RESOLUTION_KO_MISSING}
+    blocks = [{'type': 'code', 'text': b[1]} if isinstance(b, tuple) else {'type': 'text', 'text': b} for b in entry]
+    return {'status': 'registered', 'basis': RESOLUTION_KO_BASIS, 'blocks': blocks, 'note': RESOLUTION_KO_FOOTER}
+
+
+def attach_resolution_ko(report):
+    report.setdefault('policy', {})['resolution_ko_version'] = RESOLUTION_KO_VERSION
+    for f in report['findings']:
+        if f.get('origin') == 'custom_rule':
+            f['resolution_ko'] = {'status': 'not_applicable', 'reason': 'custom_rule_not_official_check', 'blocks': []}
+        else:
+            f['resolution_ko'] = resolution_ko(f.get('source_check_id'), passed=f.get('official_status') == 'passed')
+    return report
+
+
+def resolution_ko_markdown(res):
+    if not res or res.get('status') == 'not_applicable':
+        return []
+    out = ['### 해결방안(한글)', '']
+    if res['status'] != 'registered':
+        return out + [md_text(res.get('message') or RESOLUTION_KO_MISSING), '']
+    for block in res['blocks']:
+        out.extend([md_code_block(block['text']) if block['type'] == 'code' else md_text(block['text']), ''])
+    return out + ['> ' + md_inline(res['note']), '']
+
+
+def resolution_ko_html(res):
+    if not res or res.get('status') == 'not_applicable':
+        return ''
+    head = '<h4>해결방안(한글) <small>(공식 조치 안내 번역·el 계열 보완, 변경은 별도 승인)</small></h4>'
+    if res['status'] != 'registered':
+        return '<div class="box ko-res missing">%s<p>%s</p></div>' % (head, esc(res.get('message') or RESOLUTION_KO_MISSING))
+    body = ''.join('<pre>%s</pre>' % esc(b['text']) if b['type'] == 'code' else '<p>%s</p>' % esc(b['text']) for b in res['blocks'])
+    return '<div class="box ko-res">%s%s<p class="muted">%s</p></div>' % (head, body, esc(res['note']))
+
+
 def model(text, mask='strict', as_of=None, parsed=None):
     started = time.monotonic()
     summary, collected, checks, notes = parsed or parse_report(text)
@@ -840,6 +1074,8 @@ def model(text, mask='strict', as_of=None, parsed=None):
     masker = Masker(mask, public_check_ids=explain)
     report = masker.apply(report)
     masker.verify(report)
+    # 0.5.4: 한글 해결방안은 입력과 무관한 고정 문구라 마스킹·검증 뒤에 붙인다(공식 판정·수치는 그대로).
+    attach_resolution_ko(report)
     if time.monotonic() - started > MAX_PROCESS_SECONDS:
         raise InputError('processing time limit exceeded')
     return report
@@ -881,6 +1117,7 @@ def markdown(report, extra_blocks=None):
                     '평가 범위: ' + md_inline(assessment_text(f)), '',
                     md_text(f['observed']), '', md_text(f['recommendation']), '', md_text(f['impact']), '',
                     '변경 승인: ' + APPROVAL_KO[f['approval_required']], '',
+                    *resolution_ko_markdown(f.get('resolution_ko')),
                     '### 재확인 절차', '', *['- ' + md_inline(step) for step in f['verification_steps']], '',
                     '### 관측값(원본 gzip)' if f.get('origin') == 'custom_rule' and not f['evidence_blocks'] else '### 원본 근거(마스킹)', ''])
         for block in f['evidence_blocks']:
@@ -1051,7 +1288,8 @@ def finding_card(f, attached=()):
     other = [b for b in f['evidence_blocks'] if b.get('section') != 'resolution']
     evidence = ''
     if resolution:
-        evidence += '<details open><summary>공식 조치 안내(Resolution, 마스킹)</summary>%s</details>' % evidence_html(resolution)
+        # 0.5.4: 한글 해결방안을 위에 두고 영문 원문은 접어서 남긴다(인쇄 시에는 펼쳐진다).
+        evidence += '<details class="res-en"><summary>공식 조치 안내(Resolution, 마스킹, 영문 원문)</summary>%s</details>' % evidence_html(resolution)
     if custom and not f['evidence_blocks']:
         # 0.5.2(C3): 자체 점검은 판정 조건을 근거처럼 다시 싣지 않고, 원본 gzip의 서버별 관측값을 보인다.
         values = f.get('observed_values') or []
@@ -1063,6 +1301,8 @@ def finding_card(f, attached=()):
         meta = '<span class="chip">우선순위 해당 없음(정보)</span><span class="chip">영역 %s</span>' % esc(f['category'])
     else:
         meta = '<span class="chip">우선순위 %s</span><span class="chip">영역 %s</span>' % (esc(plain(priority_text(f['priority']))), esc(f['category']))
+    if not custom:
+        verdict += resolution_ko_html(f.get('resolution_ko'))
     verdict += ''.join(own_aux_box(g) for g in attached)
     # 0.5.2(C1): 카드마다 같은 표준 면책 문장은 생략하고 검사 결과 머리말에 한 번만 둔다(JSON·Markdown은 그대로).
     impact = '' if f['impact'] in STANDARD_IMPACT else '<p>%s</p>' % esc(f['impact'])
@@ -1116,7 +1356,7 @@ h3{font-size:16px;margin:0 0 8px}h4{font-size:14px;margin:0 0 6px}small,.muted,.
 .card.sev-error{border-left-color:var(--error)}.card.sev-warning{border-left-color:var(--warning)}.card.sev-passed{border-left-color:var(--passed)}
 .card-h{display:flex;flex-wrap:wrap;align-items:center;gap:8px 10px;margin-bottom:10px}.card-h h3{margin:0;flex:1 1 260px}
 .box{border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin:8px 0}.box p{margin:4px 0}
-.box.official{background:var(--bar)}.box.own-verdict{border-style:dashed}.steps ol{margin:4px 0;padding-left:22px}
+.box.official{background:var(--bar)}.box.own-verdict{border-style:dashed}.box.ko-res{border-left:4px solid var(--accent)}.box.ko-res.missing{border-left-color:var(--unknown)}.box.ko-res pre{white-space:pre-wrap}.steps ol{margin:4px 0;padding-left:22px}
 details{margin:8px 0}summary{cursor:pointer;font-weight:600}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:var(--bar);padding:8px;border-radius:6px}
 .loc{font-size:12px;color:var(--muted);margin:6px 0 2px}
 .table-scroll{overflow-x:auto}table{border-collapse:collapse;font-size:14px}th,td{border:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top}

@@ -14,8 +14,8 @@ import zlib
 import aistordoctor as a
 import r2_enrichment as enrichment
 
-VERSION = '0.5.3-r2'
-SCHEMA_VERSION = '1.3-r2'
+VERSION = '0.5.4-r2'
+SCHEMA_VERSION = '1.4-r2'
 MAX_COMPRESSED = 32 * 1024 * 1024
 MAX_EXPANDED = 64 * 1024 * 1024
 MAX_DEPTH = 64
@@ -305,11 +305,12 @@ def report(body, documents=1, official_text=None, as_of=None, mask='strict'):
         except MARKDOWN_ERRORS as exc:
             raise OfficialInputError('official markdown') from exc
     else:
-        r = {'schema_version': '1.1-r1', 'official_summary': None, 'findings': [], 'check_results': [],
+        r = {'schema_version': a.SCHEMA_VERSION, 'official_summary': None, 'findings': [], 'check_results': [],
              'parser_errors': [], 'policy': {'version': 'r2-initial-1', 'profile': 'unspecified'},
              'input_metadata': {}, 'source_versions': {}, 'facts': {}, 'coverage': {}, 'completeness': {},
              'masking': {'level': mask, 'policy_version': 'r2-allowlist-1', 'limitations': 'R2 원본은 허용 필드만 추출하며 공유 전 수동 검토가 필요합니다.'}}
-    r['policy'] = {'version': 'r2-initial-1', 'profile': 'unspecified', 'official_explanations': 'r1-1'}
+    r['policy'] = {'version': 'r2-initial-1', 'profile': 'unspecified', 'official_explanations': 'r1-1',
+                   'resolution_ko_version': a.RESOLUTION_KO_VERSION}  # 0.5.4
     r['tool_version'] = VERSION
     r['schema_version'] = SCHEMA_VERSION
     r['input_metadata']['parser_version'] = 'r2-structural-2'
@@ -341,7 +342,8 @@ def report(body, documents=1, official_text=None, as_of=None, mask='strict'):
             impact='현재 서비스 상태·데이터 안전성·원인을 확정하지 않습니다.',
             # 0.5.2(B2): 수집 오류는 설정 변경 대상이 아니므로 승인 불필요.
             approval_required=(c['rule_id'] != 'r2.collection.errors') if c['rule_result'] else None,
-            verification_steps=['필요한 입력과 의미를 확인한 뒤 동일 조건으로 재점검합니다.'], limitations=[c['condition']]))
+            verification_steps=['필요한 입력과 의미를 확인한 뒤 동일 조건으로 재점검합니다.'], limitations=[c['condition']],
+            resolution_ko={'status': 'not_applicable', 'reason': 'custom_rule_not_official_check', 'blocks': []}))  # 0.5.4
     r['analysis_summary'] = {'custom_rule_counts': dict(Counter(c['rule_result'] or 'not_evaluated' for c in checks)),
                              'custom_rule_catalog': {c['rule_id']: {'version': c['rule_version'], 'required_inputs': c['required_inputs'], 'condition': c['condition']} for c in checks}}
     partial = bool(r['parser_errors']) or any(c['rule_result'] is None for c in checks if c['rule_id'] != 'r2.version.consistency')

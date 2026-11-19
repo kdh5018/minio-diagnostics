@@ -6,8 +6,8 @@
 
 | 항목 | 내용 |
 |---|---|
-| 최신 배포본 | 0.5.3 (`el8-x86_64`: RHEL·Rocky·AlmaLinux 8/9/10, x86_64). 런타임 동봉, 서버에 Python 설치 불필요 |
-| 분석기 버전 | R1 `0.5.3-r1`(공식 Markdown), R2 `0.5.3-r2`(원본 gzip 결합, JSON 스키마 `1.3-r2`) |
+| 최신 배포본 | 0.5.4 (`el8-x86_64`: RHEL·Rocky·AlmaLinux 8/9/10, x86_64). 런타임 동봉, 서버에 Python 설치 불필요 |
+| 분석기 버전 | R1 `0.5.4-r1`(공식 Markdown, JSON 스키마 `1.2-r1`), R2 `0.5.4-r2`(원본 gzip 결합, JSON 스키마 `1.4-r2`) |
 | 검증 | Rocky 8·9·10 최소 컨테이너(Python 없음, 네트워크 차단, 비root), 2026-10-12 샘플, 2026-10-14 R3 실자료 |
 | 라이선스 | 사내·고객사 전용(`LICENSE`). 런타임 제3자 고지는 배포본 `licenses/` |
 | 개선 계획·상태 | [`docs/IMPROVEMENT_PLAN.md`](IMPROVEMENT_PLAN.md) |
@@ -81,6 +81,11 @@ THP 자체 점검은 공식 `sys.mem.thp` Resolution 권장값(enabled=madvise, 
 수집 오류는 고정 분류("대상 / 종류")로만 집계하고 원문은 내보내지 않습니다. `sys.errors`가 없으면 오류 행 수는 최소값으로 표시합니다.
 0.5.3부터 수집 오류 기록 자체 점검은 `정보`(ⓘ) 등급입니다. 경고·실패 수와 우선순위(P2)에 넣지 않으며, 수집 오류만으로는 `--fail-on-priority P2`가 걸리지 않습니다. JSON `custom_rule_counts`에 `info`가 생깁니다.
 HTML 검사 결과 목록의 공식 버튼(오류·경고)은 mc 보고서 요약 숫자와 같고, 자체 점검은 따로 셉니다. THP(`r2.thp.mode`↔`sys.mem.thp`)·IOMMU(`r2.iommu.consistency`↔`sys.mem.iommu`) 자체 결과는 공식 카드가 있으면 그 안의 보조 정보로 표시합니다.
+0.5.4부터 공식 오류·경고 카드에는 공식 판정 바로 아래 `해결방안(한글)` 상자가 있습니다. mc 내장 공식 조치 안내(Resolution)를 번역한 고정 사전(검사 ID 58개, 사전 버전 `ko-res-1`)이며,
+원문의 Debian 계열 명령은 el 계열 명령(예: IOMMU는 grubby·grub2-mkconfig → 재부팅 → /proc/cmdline 확인, THP는 echo 일시 적용과 tuned 영구 적용 구분)으로 바꿨습니다.
+실행 중 번역·네트워크 사용은 없고, 사전에 없는 검사는 "한글 해결방안 미등록 — 아래 공식 원문 참고"로 표시합니다. 영문 원문 `공식 조치 안내(Resolution, 마스킹, 영문 원문)`는 그 아래 접힌 상태로 남고 인쇄 시 펼쳐집니다.
+Markdown에는 `### 해결방안(한글)` 절, JSON finding에는 `resolution_ko`(`status`: registered·not_registered·not_applicable, `blocks`)가 붙습니다. 통과·자체 점검은 not_applicable입니다.
+안내 문구는 조치 제안일 뿐이며 변경은 영향을 확인한 뒤 별도 승인으로 수행합니다. 공식 판정·숫자·종료 코드·마스킹은 0.5.3과 같습니다.
 IOMMU 옵션 부재를 off로 간주하지 않습니다. pool/set 인덱스만으로 quorum·물리 장애 도메인을 계산하지 않습니다.
 인증서는 수집 시점 또는 명시한 `--as-of`에서 유효기간만 점검합니다. 신뢰체인·SAN·만료 임박 정책은 미지원입니다.
 Markdown 결합 시 알려진 Server/Endpoint 표와 수집 시각(허용 차이 120초)을 비교합니다.
