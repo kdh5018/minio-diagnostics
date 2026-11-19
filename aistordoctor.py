@@ -18,7 +18,7 @@ import sys
 import time
 import uuid
 
-VERSION = '0.5.6-r1'
+VERSION = '0.5.7-r1'
 SCHEMA_VERSION = '1.2-r1'
 PARSER_VERSION = 'official-markdown-r1-2'
 POLICY_VERSION = 'r1-1'
@@ -712,13 +712,23 @@ MASK_HOST_STOPWORDS = frozenset(
     'configuration process processes memory cpu cpus drive drives disk disks number numbers id ids type types level levels '
     'address addresses port ports total value values check checks result results details detail table data group groups '
     'role roles mode modes size sizes uptime local remote pod pods network networks storage capacity health '
-    'recommended required minimum maximum min max default current expected actual configured'.split())
+    'recommended required minimum maximum min max default current expected actual configured '
+    # 0.5.7(N2): 'Hostname resolution failed' 같은 문장의 일반 낱말
+    'resolution lookup resolve resolving verification validation mismatch unknown missing'.split())
+# 0.5.7(N2): 라이선스 값 중 플랜·상태 이름은 비밀이 아니므로 그대로 둔다(키·서명 값은 계속 가림).
+MASK_LICENSE_PLANS = frozenset('enterprise enterprise-lite enterprise-plus standard free trial community agpl agplv3 '
+                               'none expired valid invalid unlicensed'.split())
+# 0.5.7(N3): 짧은 비밀번호 키는 부분 일치(bypass 등)를 피하려고 정확히 일치할 때만 본다.
+MASK_SECRET_EXACT = frozenset('pass pwd pw dbpass dbpwd userpass'.split())
 
 
 class Masker:
     """Best-effort redaction, followed by leak checks. No mapping file is emitted."""
     # 키=값 형태의 자격증명. 키는 토큰 시작에서만 잡고(따옴표로 감싼 JSON 키 포함) 값 길이에 상한을 둔다.
-    secret = re.compile(r'''(?<![A-Za-z0-9_.-])(["']?)([A-Za-z][A-Za-z0-9_.-]{0,63})\1(\s*[:=]\s*|[ \t]+)'''
+    # 0.5.7(N3): CLI 플래그(--secret-key X, -p=X)도 키로 본다. 'foo-secret'처럼 낱말 중간의 '-'는 키 시작이 아니다.
+    # 'access key: X'처럼 공백 낀 키와 'accessKey => X' 구분자도 받는다.
+    secret = re.compile(r'''(?<![A-Za-z0-9_.])(?<![A-Za-z0-9_.]-)(["']?)([A-Za-z][A-Za-z0-9_.-]{0,63}(?:[ \t](?:key|token|secret|password)(?![A-Za-z0-9_]))?)\1'''
+                        r'''(\s*(?:=>|[:=])\s*|[ \t]+)'''
                         r'''("(?:\\.|[^"\\\n]){0,4096}"|'(?:\\.|[^'\\\n]){0,4096}'|[^\s|,;"']{1,4096})''')
     pem_begin = re.compile(r'-----BEGIN ([A-Z0-9 ]{1,40})-----')
     pem_end = re.compile(r'-----END [A-Z0-9 ]{1,40}-----')
@@ -726,13 +736,19 @@ class Masker:
     jwt = re.compile(r'(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{4,8192}\.[A-Za-z0-9_-]{4,8192}\.[A-Za-z0-9_-]{0,8192}')
     encoded = re.compile(r'(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{40,8192}={0,2}(?![A-Za-z0-9+/=])')
     email = re.compile(r'(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63}){0,126}')
-    subject = re.compile(r'(?<![A-Za-z0-9_])((?:CN|OU|O|emailAddress)[ \t]*=[ \t]*|(?:CN|DNS|URI)[ \t]*:[ \t]*)([^,/\n\r"\'|<>+;]{1,253})')
+    # 0.5.7(N2): 값에 괄호를 넣지 않는다('(CN=minio)'의 닫는 괄호 보존).
+    subject = re.compile(r'(?<![A-Za-z0-9_])((?:CN|OU|O|emailAddress)[ \t]*=[ \t]*|(?:CN|DNS|URI)[ \t]*:[ \t]*)([^,/\n\r"\'|<>+;()]{1,253})')
     mac = re.compile(r'(?<![0-9A-Fa-f:.-])[0-9A-Fa-f]{2}([:-])[0-9A-Fa-f]{2}(?:\1[0-9A-Fa-f]{2}){4}(?![0-9A-Fa-f:.-])')
+    # 0.5.7(N3): 점 표기 MAC(Cisco 형식 5254.00ab.cd24), AWS 형식 액세스 키, URL 사용자 정보(scheme://user:pass@).
+    mac_dot = re.compile(r'(?<![0-9A-Za-z.])[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}(?![0-9A-Za-z.])')
+    aws_key = re.compile(r'(?<![A-Za-z0-9])(?:AKIA|ASIA|AIDA|AROA|AGPA|ANPA|ANVA|AIPA)[A-Z0-9]{12,20}(?![A-Za-z0-9])')
+    userinfo = re.compile(r'(?<![A-Za-z0-9+.-])([A-Za-z][A-Za-z0-9+.-]{1,20}://)([^\s/@:\[\]]{1,256})(?::([^\s/@]{1,256}))?@')
     uuid_re = re.compile(r'(?<![0-9A-Fa-f-])[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}(?![0-9A-Fa-f-])')
     host = re.compile(r'(?<![A-Za-z0-9_.-])[A-Za-z0-9][A-Za-z0-9_-]{0,62}(?:\.[A-Za-z0-9_-]{1,63}){1,126}')
     identifiers = re.compile(r'(?P<url>https?://[^\s<>\]\)]{1,8192})'
                              r'|(?P<ip4>(?<![0-9.])(?:\d{1,3}\.){3}\d{1,3}(?::\d{1,5})?(?![0-9]))'
-                             r'|(?P<hp>(?<![\w.:/-])[A-Za-z][\w-]{0,62}(?:\.[\w-]{1,63}){0,126}:\d{2,5}(?!\d))'
+                             # 0.5.7(N1): 'IP Address:10.44.33.22'의 'Address:10'을 호스트:포트로 잡지 않는다(뒤가 '.숫자'면 IPv4).
+                             r'|(?P<hp>(?<![\w.:/-])[A-Za-z][\w-]{0,62}(?:\.[\w-]{1,63}){0,126}:\d{2,5}(?!\d)(?!\.\d))'
                              r'|(?P<path>(?<![\w.@/\\-])(?:[A-Za-z]:\\|/)(?:[\w.@-]{1,255}[/\\]){1,64}[\w.@-]{1,255})', re.I)
     short_host = re.compile(r'(?i)(?<![A-Za-z0-9_-])(servers?|hosts?|hostname|nodes?|peers?|endpoints?|instances?|machine)'
                             r'([ \t]*[:=][ \t]*|[ \t]+)(["\']?)([A-Za-z][A-Za-z0-9-]{0,62})(?![A-Za-z0-9_.@-])')
@@ -770,22 +786,41 @@ class Masker:
     # -- 판정 함수: 마스킹과 사후 검증이 같은 기준을 쓴다 ----------------------------
     def host_sensitive(self, value):
         host = value.rstrip('.').lower()
-        if '_' in host or host in self.public_tokens or host in MASK_PUBLIC_HOSTS:
+        if host in self.public_tokens or host in MASK_PUBLIC_HOSTS:
             return False
-        tld = host.rsplit('.', 1)[-1]
+        labels = host.split('.')
+        tld = labels[-1]
         if not tld.isascii() or not tld.isalpha() or tld in MASK_FILE_EXT:
             return False
+        if '_' in host:
+            # 0.5.7(N3): 밑줄 든 이름(qz_node14.customer.co.kr)은 라벨 3개 이상인 실제 도메인 형태만 호스트로 본다
+            # (snake_case 필드 이름 오탐 방지). 밑줄은 TLD·도메인 라벨에는 올 수 없다.
+            return len(labels) >= 3 and '_' not in labels[-2] + tld and (len(tld) == 2 or tld in MASK_GTLDS)
+        if len(tld) == 2 and len(labels) == 2 and labels[0] in MASK_HOST_STOPWORDS:
+            return False  # 0.5.7(N2): drive.id·status.ok·pool.id 같은 필드 이름
         return len(tld) == 2 or tld in MASK_GTLDS
 
     @staticmethod
-    def secret_key(key, separator):
+    def secret_key(key, separator, flag=False):
         norm = re.sub(r'[^a-z0-9]', '', key.lower())
-        if not any(word in norm for word in MASK_SECRET_WORDS):
+        if not (any(word in norm for word in MASK_SECRET_WORDS) or norm in MASK_SECRET_EXACT or norm.endswith('pwd')):
             return False
-        if separator.strip():
-            return True
+        if separator.strip() or flag:
+            return True  # 0.5.7: CLI 플래그(--secret-key X)는 공백 구분도 값으로 본다.
         # 공백 구분(KEY value)은 환경변수 형태(대문자·밑줄) 키만 자격증명으로 본다.
         return bool(re.fullmatch(r'[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+', key))
+
+    def secret_match(self, match):
+        """키=값 일치가 가려야 할 자격증명인지. 마스킹과 사후 검증이 같이 쓴다."""
+        quote, key, separator, value = match.groups()
+        flag = not quote and match.start() > 0 and match.string[match.start() - 1] == '-'
+        if not self.secret_key(key, separator, flag) or self.is_placeholder(value):
+            return False
+        norm = re.sub(r'[^a-z0-9]', '', key.lower())
+        # 0.5.7(N2): 'license: Enterprise' 같은 플랜·상태 이름은 남긴다.
+        if 'license' in norm and value.strip('"\'').lower() in MASK_LICENSE_PLANS:
+            return False
+        return True
 
     def is_placeholder(self, value):
         return bool(self.placeholder.fullmatch(value.strip('"\'').rstrip(self.trailing)))
@@ -833,9 +868,9 @@ class Masker:
 
     def _secret_sub(self, match):
         self.tick()
-        quote, key, separator, value = match.groups()
-        if not self.secret_key(key, separator) or self.is_placeholder(value):
+        if not self.secret_match(match):
             return match.group(0)
+        quote, key, separator, value = match.groups()
         return quote + key + quote + separator + '[REDACTED]'
 
     def _subject_sub(self, match):
@@ -874,6 +909,8 @@ class Masker:
             check_deadline(self.deadline)
         text = self.strip_pem(text)
         text = self.bearer.sub('Bearer [REDACTED]', text)
+        text = self.userinfo.sub(lambda m: m.group(1) + '[REDACTED]' + (':[REDACTED]' if m.group(3) is not None else '') + '@', text)
+        text = self.aws_key.sub('[REDACTED]', text)
         text = self.secret.sub(self._secret_sub, text)
         text = self.jwt.sub('[JWT REMOVED]', text)
         text = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', text)
@@ -883,6 +920,7 @@ class Masker:
         text = self.identifiers.sub(self.alias, text)
         text = self.host.sub(self._host_sub, text)
         text = self.mac.sub(self.alias, text)
+        text = self.mac_dot.sub(self.alias, text)
         text = self.uuid_re.sub(self.alias, text)
         text = self.ipv6.sub(self._ipv6_sub, text)
         text = self.encoded.sub(self._encoded_sub, text)
@@ -943,10 +981,13 @@ class Masker:
                 found.append('alias')
                 break
         for match in self.secret.finditer(text):
-            quote, key, separator, value = match.groups()
-            if self.secret_key(key, separator) and not self.is_placeholder(value):
+            if self.secret_match(match):
                 found.append('secret')
                 break
+        if self.aws_key.search(text) or any(not self.is_placeholder(m.group(2)) for m in self.userinfo.finditer(text)):
+            found.append('secret')
+        if self.mac_dot.search(text):
+            found.append('mac')
         if self.jwt.search(text):
             found.append('jwt')
         if self.email.search(text):

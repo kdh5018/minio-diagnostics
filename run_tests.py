@@ -849,5 +849,80 @@ class Fix056Tests(unittest.TestCase):
         self.assertIn('OUT_DIR=$HOME/aistor-diag-output', shell)
 
 
+class Fix057Tests(unittest.TestCase):
+    """0.5.7: Shield 0.5.6 재점검 N1(콜론 뒤 IPv4로 보고서 전체 실패)·N2(과마스킹)·N3(누락). 모두 합성 값."""
+
+    N1_LINES = ('tls peer X509v3 SAN: DNS:x.corp, IP Address:10.44.33.22', 'addr:10.1.2.3', 'host:10.0.0.5:9000',
+                'DNS:x.corp, IP:10.9.9.9', 'inet addr:10.1.2.3  Bcast:10.1.2.255', 'peer:10.0.0.5', 'Address:192.168.0.1:9000',
+                'IP Address:10.44.33.22, IP Address:10.44.33.23')
+
+    def bodies(self, line, level='strict'):
+        r = a.model(report_with_detail(line), level)
+        return {'json': json.dumps(r, ensure_ascii=False), 'md': a.markdown(r), 'html': a.html_report(r)}
+
+    def test_ipv4_after_colon_does_not_fail_report(self):
+        for level in ('strict', 'basic'):
+            for line in self.N1_LINES:
+                with self.subTest(level=level, line=line):
+                    for fmt, body in self.bodies(line, level).items():
+                        for ip in ('10.44.33.2', '10.1.2.', '10.0.0.5', '10.9.9.9', '192.168.0.1'):
+                            self.assertNotIn(ip, body, fmt)
+
+    def test_ipv4_after_colon_cli_writes_report(self):
+        try:
+            root = Path(tempfile.mkdtemp(dir=a.secure_dir(a.DEFAULT_OUTPUT_DIR / 'test-artifacts')))
+            a.secure_dir(root)
+        except a.OutputError:
+            self.skipTest('protected-storage integration blocked: backend owner/mode cannot be verified')
+        source = root / 'ipcolon.md'
+        source.write_text(report_with_detail(self.N1_LINES[0]), encoding='utf-8')
+        out = root / 'out'
+        with contextlib.redirect_stdout(StringIO()), contextlib.redirect_stderr(StringIO()):
+            rc = a.main(['--official-report', str(source), '--out-dir', str(out)])
+        self.assertIn(rc, (0, 4))
+        self.assertTrue(list(out.glob('*/aistor-diag-report.html')))
+
+    def test_host_port_still_masked(self):
+        for line, needle in (('endpoint minio-7.example:9000', 'minio-7'), ('host:node3:9000 down', 'node3')):
+            for fmt, body in self.bodies(line).items():
+                self.assertNotIn(needle, body, (line, fmt))
+
+    def test_overmasking_fixed(self):
+        for line, kept in (('license: Enterprise', 'Enterprise'), ('drive.id mismatch', 'drive.id'), ('status.ok', 'status.ok'),
+                           ('pool.id 3', 'pool.id'), ('Hostname resolution failed', 'resolution')):
+            with self.subTest(line=line):
+                self.assertIn(kept, self.bodies(line)['json'])
+        md = self.bodies('subject (CN=minio) end')['md']
+        self.assertRegex(md, r'\(CN=identifier-\d{3}\) end')
+        self.assertNotIn('minio)', md)
+        # 라이선스 키 값 자체는 계속 가린다.
+        self.assertNotIn('canaryLic057', self.bodies('license: canaryLic057')['json'])
+
+    def test_missed_shapes_now_masked(self):
+        cases = (('--secret-key canaryN3a', 'canaryN3a'), ('--access-key=canaryN3b', 'canaryN3b'),
+                 ('access key: canaryN3c', 'canaryN3c'), ('secret key = canaryN3d', 'canaryN3d'),
+                 ('pass=canaryN3e', 'canaryN3e'), ('pwd: canaryN3f', 'canaryN3f'), ('accessKey => canaryN3g', 'canaryN3g'),
+                 ('key AKIAIOSFODNN7CANARY', 'AKIAIOSFODNN7CANARY'),
+                 ('minio://canaryuser:canarypw@10.1.1.1/x', 'canaryuser'), ('minio://canaryuser:canarypw@10.1.1.1/x', 'canarypw'),
+                 ('qz_node14.customer.co.kr down', 'qz_node14'), ('mac 5254.00ab.cd24', '5254.00ab.cd24'))
+        for level in ('strict', 'basic'):
+            for line, needle in cases:
+                with self.subTest(level=level, line=line):
+                    for fmt, body in self.bodies(line, level).items():
+                        self.assertNotIn(needle, body, fmt)
+
+    def test_ordinary_words_not_treated_as_secrets(self):
+        for line in ('bypass=1', 'passed: 3', 'compass=x', 'my_var.field', 'self.aliases.get', 'foo-secret-free text'):
+            with self.subTest(line=line):
+                self.assertNotIn('[REDACTED]', self.bodies(line)['json'])
+
+    def test_new_patterns_linear(self):
+        for unit in ('-a', '--a ', 'a key ', 'x://', 'x://a:', 'AKIA', 'abcd.', 'a=>', 'a_', 'Address:1', 'a:1.', 'a key: '):
+            text = unit * (65536 // len(unit))
+            started = a.time.monotonic()
+            a.Masker('strict').string(text)
+            self.assertLess(a.time.monotonic() - started, 3.0, unit)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
