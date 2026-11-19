@@ -477,3 +477,25 @@ CSS와 JS를 모두 뺀 사본에서도 카드 전부와 통과·오류·경고 
   배포물을 Rocky 8·9·10 minimal 컨테이너(네트워크 없음, 비root)에서 실행해 같은 숫자·카드 속성 확인.
   Chrome·Firefox·WebKit에서 공식 카드 수 = mc 요약, JS 없음·인쇄 펼침·적대적 문자열·외부 요청 0 확인.
 - 201 서버 설정 변경·mc 재실행 없음. 0.5.3 배포물은 201에 올리지 않음.
+
+## 0.5.4 한글 해결방안 (2026-11-19)
+
+- 계기: 0.5.2-r2 HTML을 본 사용자 요청("경고 3" 표시 + 한글 해결방안). "경고 3"은 0.5.3(5c550cc)에서 이미 고쳤으므로 회귀 확인만 했다.
+- 변경
+  - `aistordoctor.RESOLUTION_KO`: mc 검사 ID 58개의 정적 한글 사전(버전 `ko-res-1`). 근거는 mc RELEASE.2026-07-24T01-15-12Z 바이너리에 내장된
+    공식 조치 안내 `docs/<검사 ID>.md`(보고서 Resolution 원문과 같은 글)이다. 실행 중 번역·네트워크 사용은 없다.
+    원문의 Debian 계열 명령은 el 계열로 바꿨고(IOMMU: grubby·GRUB_CMDLINE_LINUX·grub2-mkconfig → 재부팅 → /proc/cmdline, THP: echo 일시 적용과
+    tuned 사용자 프로필 영구 적용, swap·ethtool·NTP 등도 같은 방식), 원문에 없는 조치나 수치는 넣지 않았다. 모든 항목 끝에 "변경은 별도 승인, 조치 후 재수집" 문구를 둔다.
+  - HTML: 공식 오류·경고 카드에서 공식 판정 상자 바로 아래에 "해결방안(한글)" 상자. 자체 점검 보조 정보와 해설은 그 아래.
+    "공식 조치 안내(Resolution, 마스킹, 영문 원문)"는 이제 접혀 있다(인쇄 시 펼침). 사전에 없는 검사는 "한글 해결방안 미등록 — 아래 공식 원문 참고".
+    통과 카드와 자체 점검 카드에는 붙이지 않는다.
+  - Markdown: 각 공식 finding에 `### 해결방안(한글)` 절. JSON: finding마다 `resolution_ko`
+    (`status` registered·not_registered·not_applicable, `blocks`[type text·code], `basis`, `note`). 정책에 `resolution_ko_version`.
+    필드 추가라 스키마 R1 1.1-r1 → 1.2-r1, R2 1.3-r2 → 1.4-r2. 사전 문구는 입력과 무관한 고정 문구라 마스킹·검증 뒤에 붙인다.
+- 변하지 않음: 공식 판정·숫자, 종료 코드 0~4의 의미, 120초 결합 허용치, 자원 제한, 마스킹 규칙, 카드 수·우선순위.
+- 테스트: `Review054Tests` 6건(공식 버튼 = mc 요약 2·1, 상자 위치·순서, 영문 원문 접힘, 미등록·통과·자체 점검 처리, 사전이 관측된 검사 ID를 모두 포함, JSON·Markdown·스키마).
+  test_r2 93건(건너뜀 6), run_tests 59건(건너뜀 3). git archive 사본 + 0.5.4 배포물로 run_tests·test_shell_release(33)·test_r2 통과.
+- 실자료(201 원본 사본, 로컬에서만): 11/17 `20261117072602` → 공식 카드 오류 2·경고 1(mc 32/2/1), 한글 상자 3개(minio.cluster.min·sys.mem.iommu·sys.mem.thp).
+  10/15 훈련 쌍 → 공식 카드 오류 4·경고 1(mc 30/4/1), 한글 상자 5개(위 3개 + sys.drive.status·sys.fs.supported). 둘 다 종료 코드 4, 미등록 0건.
+  배포물을 Rocky 8·9·10 minimal 컨테이너(네트워크 없음, 비root)에서 실행해 같은 숫자·카드 속성·한글 상자 3개 확인. Chrome·Firefox·WebKit `verify_browser.cjs` 통과.
+- 201 서버 설정 변경·mc 재실행 없음(원본 읽기 전용 복사만). 0.5.4 배포물은 201에 올리지 않음. push 없음.
