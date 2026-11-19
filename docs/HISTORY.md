@@ -228,3 +228,10 @@ strict·basic 마스킹에 지원 목록 밖 도메인 호스트, JSON `"accessK
 같이 고친 것: `license: Enterprise`·`drive.id`·`status.ok`·`resolution` 과마스킹, `(CN=minio)` 닫는 괄호 보존. `--secret-key X`·`--access-key=X`·`access key: X`·`accessKey => X`·`pass=`·`pwd:`·AKIA 형식 키·`scheme://user:pass@`·밑줄 든 도메인 호스트·점 표기 MAC 마스킹.
 공식 판정·숫자, 종료 코드 의미, 120초 결합 허용치, 자원 제한은 그대로이며 실자료 보고서는 0.5.5·0.5.6과 같습니다.
 상세는 [IMPROVEMENT_PLAN.md](IMPROVEMENT_PLAN.md)의 "0.5.7".
+
+### 2026-11-19 0.5.8 문장 속 자격증명 잔존 수정(Shield 0.5.7 재점검)
+
+0.5.6부터 `env MINIO_ROOT_PASSWORD=X`, `auth error for secret_key: X`, `args: --access-key=X`처럼 자격증명 앞에 낱말이 몇 개 오느냐에 따라 값이 보고서에 그대로 남고 사후 검증도 이를 놓쳤습니다. 자격증명이 아닌 "낱말 낱말" 쌍이 진짜 키를 값으로 삼켜 다시 검사하지 않던 탓입니다. 키가 아니면 값을 소비하지 않고 다음 낱말부터 다시 찾도록 바꾸고, 사후 검증도 같은 방식으로 검사합니다.
+같이 고친 것: 인증서 SAN의 `IP Address:fd00::…`처럼 이름표 콜론 뒤 IPv6 마스킹과 사후 검증, `pass: 12 checks` 과마스킹, `/10.44.33.22 failed access key: X` 같은 조합에서 보고서 생성이 실패하던 문제.
+공식 판정·숫자, 종료 코드 의미, 120초 결합 허용치, 자원 제한은 그대로이며 실자료 보고서는 0.5.7과 같습니다.
+상세는 [IMPROVEMENT_PLAN.md](IMPROVEMENT_PLAN.md)의 "0.5.8".
