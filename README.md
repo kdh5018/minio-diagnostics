@@ -7,8 +7,8 @@ MinIO AIStor 진단 Markdown(mc 보고서)과 원본 diagnostics gzip을 읽어 
 ## 빠른 시작
 
 ```bash
-sha256sum -c aistor-diag-analyzer-0.5.5-el8-x86_64.tar.gz.sha256
-tar -xzf aistor-diag-analyzer-0.5.5-el8-x86_64.tar.gz && cd aistor-diag-analyzer-0.5.5-el8-x86_64
+sha256sum -c aistor-diag-analyzer-0.5.6-el8-x86_64.tar.gz.sha256
+tar -xzf aistor-diag-analyzer-0.5.6-el8-x86_64.tar.gz && cd aistor-diag-analyzer-0.5.6-el8-x86_64
 ./run-report.sh --check --verify-bundle                                   # 사전 점검
 ./run-report.sh --official-report /경로/diag-report-....md \
                 --health /경로/diag-data-....json.gz --allow-partial     # 실행(--health 생략 시 공식 Markdown 단독)
