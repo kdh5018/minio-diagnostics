@@ -924,5 +924,70 @@ class Fix057Tests(unittest.TestCase):
             self.assertLess(a.time.monotonic() - started, 3.0, unit)
 
 
+class Fix058Tests(unittest.TestCase):
+    """0.5.8: Shield 0.5.7 재점검 M1(앞 단어 수에 따라 자격증명 잔존)·M2(이름표 콜론 뒤 IPv6)·M3. 모두 합성 값."""
+
+    # (키, 값 앞에 붙일 구분자 목록). 공백 구분은 환경변수형·CLI 플래그 키만 자격증명으로 본다.
+    KEYS = (('secret_key', (': ', '=', ' => ')), ('MINIO_ROOT_PASSWORD', ('=', ': ', ' ')), ('--access-key', ('=', ' ')),
+            ('access_key', ('=', ': ')), ('accessKey', (' => ', ': ')), ('secret key', (': ', ' = ')), ('pwd', (': ', '=')))
+    PREFIXES = ('', 'for ', 'auth error for ', 'mc: <ERROR> Unable to init. ', 'env ', 'args: ', 'the ', 'error for the ')
+
+    def bodies(self, line, level='strict'):
+        r = a.model(report_with_detail(line), level)
+        return {'json': json.dumps(r, ensure_ascii=False), 'md': a.markdown(r), 'html': a.html_report(r)}
+
+    def test_credentials_masked_regardless_of_leading_words(self):
+        n = 0
+        for key, seps in self.KEYS:
+            for sep in seps:
+                for prefix in self.PREFIXES:
+                    n += 1
+                    value = 'QZm1v%03dx' % n
+                    line = '%s%s%s%s is wrong' % (prefix, key, sep, value)
+                    for level in ('strict', 'basic'):
+                        with self.subTest(line=line, level=level):
+                            for fmt, body in self.bodies(line, level).items():
+                                self.assertNotIn(value, body, fmt)
+
+    def test_leak_check_catches_embedded_credentials(self):
+        # 사후 검증(fail-closed)도 앞 단어와 무관하게 남은 자격증명을 잡아야 한다.
+        m = a.Masker('strict')
+        for line in ('env MINIO_ROOT_PASSWORD=QZ6x', 'auth error for secret_key: QZ4x', 'for secret_key: QZ2x',
+                     'mc: <ERROR> Unable to init. secret_key: QZ11x', 'args: --access-key=QZAK02abc', 'the access_key=QZ10x is wrong'):
+            with self.subTest(line=line):
+                self.assertIn('secret', m.leaks(line))
+                with self.assertRaises(a.OutputError):
+                    m.verify({'x': line})
+                self.assertEqual(m.leaks(m.string(line)), [])
+
+    def test_ipv6_after_label_colon_masked(self):
+        for line in ('X509v3 SAN: DNS:a.corp, IP Address:fd00:abcd::1234', 'peer IP:fd00:abcd::1234 ok',
+                     'addr:2001:db8::7 up', 'IP Address:fd00:abcd::1234, IP Address:10.44.33.22'):
+            for level in ('strict', 'basic'):
+                with self.subTest(line=line, level=level):
+                    for fmt, body in self.bodies(line, level).items():
+                        for needle in ('fd00', '2001:db8', '10.44.33'):
+                            self.assertNotIn(needle, body, fmt)
+        self.assertIn('ipv6', a.Masker('strict').leaks('IP Address:fd00:abcd::1234'))
+        # IPv6가 아닌 콜론 값(시각, 포트)은 그대로 둔다.
+        self.assertIn('started 12:30:45 ok', self.bodies('started 12:30:45 ok')['json'])
+
+    def test_m3_rare_combination_and_pass_count(self):
+        for fmt, body in self.bodies('/10.44.33.22 failed access key: QZm3a').items():
+            self.assertNotIn('QZm3a', body, fmt)
+            self.assertNotIn('10.44.33', body, fmt)
+        self.assertIn('pass: 12 checks', self.bodies('pass: 12 checks')['md'])
+        for line, value in (('pass: QZm3pw', 'QZm3pw'), ('pass=1234', '1234'), ('pass: 5678', '5678')):
+            with self.subTest(line=line):
+                self.assertNotIn(value, self.bodies(line)['json'])
+
+    def test_secret_search_linear(self):
+        for unit in ('CN=', 'a ', 'k=', 'for ', 'env X_PASSWORD=', 'IP:fd00::1 ', 'a b=', 'x: y '):
+            text = unit * (262144 // len(unit))
+            started = a.time.monotonic()
+            a.Masker('strict').string(text)
+            self.assertLess(a.time.monotonic() - started, 3.0, unit)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

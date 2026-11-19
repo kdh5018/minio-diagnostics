@@ -6,6 +6,7 @@ import bisect
 from collections import Counter
 import datetime as dt
 import errno
+import functools
 import hashlib
 import html
 import ipaddress
@@ -727,9 +728,12 @@ class Masker:
     # 키=값 형태의 자격증명. 키는 토큰 시작에서만 잡고(따옴표로 감싼 JSON 키 포함) 값 길이에 상한을 둔다.
     # 0.5.7(N3): CLI 플래그(--secret-key X, -p=X)도 키로 본다. 'foo-secret'처럼 낱말 중간의 '-'는 키 시작이 아니다.
     # 'access key: X'처럼 공백 낀 키와 'accessKey => X' 구분자도 받는다.
-    secret = re.compile(r'''(?<![A-Za-z0-9_.])(?<![A-Za-z0-9_.]-)(["']?)([A-Za-z][A-Za-z0-9_.-]{0,63}(?:[ \t](?:key|token|secret|password)(?![A-Za-z0-9_]))?)\1'''
-                        r'''(\s*(?:=>|[:=])\s*|[ \t]+)'''
-                        r'''("(?:\\.|[^"\\\n]){0,4096}"|'(?:\\.|[^'\\\n]){0,4096}'|[^\s|,;"']{1,4096})''')
+    # 0.5.8(M1): 키+구분자와 값을 나눠 찾는다. 자격증명이 아닌 '단어 단어' 쌍이 값 자리의 진짜 키(env KEY=X)를
+    # 집어삼키지 않도록, 키가 아니면 값을 소비하지 않고 다음 낱말부터 다시 찾는다(secret_spans).
+    # 마스킹과 사후 검증이 같은 반복을 쓴다.
+    secret_head = re.compile(r'''(?<![A-Za-z0-9_.])(?<![A-Za-z0-9_.]-)(["']?)([A-Za-z][A-Za-z0-9_.-]{0,63}(?:[ \t](?:key|token|secret|password)(?![A-Za-z0-9_]))?)\1'''
+                             r'''(\s*(?:=>|[:=])\s*|[ \t]+)''')
+    secret_value = re.compile(r'''"(?:\\.|[^"\\\n]){0,4096}"|'(?:\\.|[^'\\\n]){0,4096}'|[^\s|,;"']{1,4096}''')
     pem_begin = re.compile(r'-----BEGIN ([A-Z0-9 ]{1,40})-----')
     pem_end = re.compile(r'-----END [A-Z0-9 ]{1,40}-----')
     bearer = re.compile(r'(?i)(?<![A-Za-z0-9_])Bearer[ \t]+[^\s"\'<>|,;]{1,4096}')
@@ -766,7 +770,9 @@ class Masker:
     trailing = '.,;:`\'"'
     placeholder = re.compile(r'identifier-\d{3,}|\[(?:REDACTED|MASKED|JWT REMOVED|ENCODED VALUE REMOVED|PEM BLOCK REMOVED|PRIVATE KEY REMOVED)\]')
 
-    ipv6 = re.compile(r'(?<![\w:])(?:[0-9a-f]{0,4}:){2,8}[0-9a-f:]{1,4}(?:%[\w-]{1,32})?(?![\w:])', re.I)
+    # 0.5.8(M2): 'IP Address:fd00:abcd::1234'처럼 'IP:'·'Address:' 같은 이름표 콜론 바로 뒤 IPv6도 잡는다.
+    # 콜론 앞이 16진수가 아닌 글자일 때만 허용해 주소 중간에서 다시 시작하지 않게 한다.
+    ipv6 = re.compile(r'(?:(?<![\w:])|(?<=[g-z]:))(?:[0-9a-f]{0,4}:){2,8}[0-9a-f:]{1,4}(?:%[\w-]{1,32})?(?![\w:])', re.I)
 
     def __init__(self, level, public_check_ids=(), *, public_tokens=(), deadline=None):
         self.level = level
@@ -801,26 +807,55 @@ class Masker:
         return len(tld) == 2 or tld in MASK_GTLDS
 
     @staticmethod
-    def secret_key(key, separator, flag=False):
+    @functools.lru_cache(maxsize=4096)
+    def secret_word(key):
+        """키 이름에 자격증명 낱말이 있는지(구분자와 무관한 부분). 0.5.8: 후보마다 부르므로 캐시한다."""
         norm = re.sub(r'[^a-z0-9]', '', key.lower())
-        if not (any(word in norm for word in MASK_SECRET_WORDS) or norm in MASK_SECRET_EXACT or norm.endswith('pwd')):
+        return any(word in norm for word in MASK_SECRET_WORDS) or norm in MASK_SECRET_EXACT or norm.endswith('pwd')
+
+    @staticmethod
+    def secret_key(key, separator, flag=False):
+        if not Masker.secret_word(key):
             return False
         if separator.strip() or flag:
             return True  # 0.5.7: CLI 플래그(--secret-key X)는 공백 구분도 값으로 본다.
         # 공백 구분(KEY value)은 환경변수 형태(대문자·밑줄) 키만 자격증명으로 본다.
         return bool(re.fullmatch(r'[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+', key))
 
-    def secret_match(self, match):
-        """키=값 일치가 가려야 할 자격증명인지. 마스킹과 사후 검증이 같이 쓴다."""
-        quote, key, separator, value = match.groups()
-        flag = not quote and match.start() > 0 and match.string[match.start() - 1] == '-'
+    def secret_match(self, text, start, quote, key, separator, value, value_end):
+        """키=값이 가려야 할 자격증명인지. 마스킹과 사후 검증이 같이 쓴다."""
+        flag = not quote and start > 0 and text[start - 1] == '-'
         if not self.secret_key(key, separator, flag) or self.is_placeholder(value):
             return False
         norm = re.sub(r'[^a-z0-9]', '', key.lower())
         # 0.5.7(N2): 'license: Enterprise' 같은 플랜·상태 이름은 남긴다.
         if 'license' in norm and value.strip('"\'').lower() in MASK_LICENSE_PLANS:
             return False
+        # 0.5.8(M3): 'pass: 12 checks'처럼 숫자 뒤에 낱말이 이어지는 집계 문장은 비밀번호로 보지 않는다.
+        if (norm == 'pass' and ':' in separator and value.isdigit()
+                and re.match(r'[ \t]+[A-Za-z]', text[value_end:value_end + 2])):
+            return False
         return True
+
+    def secret_spans(self, text):
+        """가려야 할 (키 시작, 값 끝, 따옴표, 키, 구분자) 목록.
+
+        키가 아닌 후보('auth error', 'env MINIO_...')는 값을 소비하지 않고 다음 낱말부터 다시 본다.
+        후보 하나의 검사 길이는 키 64자+구분자로 묶이고, 값은 자격증명 키일 때만 읽으므로 입력에 선형이다.
+        """
+        pos, spans = 0, []
+        while True:
+            head = self.secret_head.search(text, pos)
+            if not head:
+                return spans
+            self.tick()
+            quote, key, separator = head.groups()
+            value = self.secret_word(key) and self.secret_value.match(text, head.end())
+            if value and self.secret_match(text, head.start(), quote, key, separator, value.group(0), value.end()):
+                spans.append((head.start(), value.end(), quote, key, separator))
+                pos = value.end()
+            else:
+                pos = head.start() + 1  # lookbehind가 낱말 중간 시작을 막으므로 다음 후보는 다음 낱말이다.
 
     def is_placeholder(self, value):
         return bool(self.placeholder.fullmatch(value.strip('"\'').rstrip(self.trailing)))
@@ -866,12 +901,14 @@ class Masker:
         out.append(text[pos:])
         return self.pem_end.sub('[PEM BLOCK REMOVED]', ''.join(out))
 
-    def _secret_sub(self, match):
-        self.tick()
-        if not self.secret_match(match):
-            return match.group(0)
-        quote, key, separator, value = match.groups()
-        return quote + key + quote + separator + '[REDACTED]'
+    def redact_secrets(self, text):
+        out, pos = [], 0
+        for start, end, quote, key, separator in self.secret_spans(text):
+            out.append(text[pos:start])
+            out.append(quote + key + quote + separator + '[REDACTED]')
+            pos = end
+        out.append(text[pos:])
+        return ''.join(out)
 
     def _subject_sub(self, match):
         value = match.group(2).rstrip(' \t.')
@@ -897,12 +934,15 @@ class Masker:
             return match.group(0)
         return match.group(1) + match.group(2) + match.group(3) + self.alias_value(name)
 
-    def _ipv6_sub(self, match):
+    @staticmethod
+    def is_ipv6(value):
         try:
-            address = ipaddress.ip_address(match.group(0).split('%', 1)[0])
+            return ipaddress.ip_address(value.split('%', 1)[0]).version == 6
         except ValueError:
-            return match.group(0)
-        return self.alias(match) if address.version == 6 else match.group(0)
+            return False
+
+    def _ipv6_sub(self, match):
+        return self.alias(match) if self.is_ipv6(match.group(0)) else match.group(0)
 
     def string(self, text):
         if self.deadline is not None:
@@ -911,7 +951,7 @@ class Masker:
         text = self.bearer.sub('Bearer [REDACTED]', text)
         text = self.userinfo.sub(lambda m: m.group(1) + '[REDACTED]' + (':[REDACTED]' if m.group(3) is not None else '') + '@', text)
         text = self.aws_key.sub('[REDACTED]', text)
-        text = self.secret.sub(self._secret_sub, text)
+        text = self.redact_secrets(text)
         text = self.jwt.sub('[JWT REMOVED]', text)
         text = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', text)
         text = ''.join(c for c in text if c in '\n\t' or ord(c) >= 32 and ord(c) != 127)
@@ -980,10 +1020,8 @@ class Masker:
             elif original in text:
                 found.append('alias')
                 break
-        for match in self.secret.finditer(text):
-            if self.secret_match(match):
-                found.append('secret')
-                break
+        if self.secret_spans(text):
+            found.append('secret')
         if self.aws_key.search(text) or any(not self.is_placeholder(m.group(2)) for m in self.userinfo.finditer(text)):
             found.append('secret')
         if self.mac_dot.search(text):
@@ -998,6 +1036,8 @@ class Masker:
             found.append('uuid')
         if self.ipv4_leak.search(text):
             found.append('ipv4')
+        if any(self.is_ipv6(m.group(0)) for m in self.ipv6.finditer(text)):
+            found.append('ipv6')  # 0.5.8(M2)
         if any(self.host_sensitive(m.group(0)) and not self.is_public(m.group(0)) for m in self.host.finditer(text)):
             found.append('host')
         for match in self.subject.finditer(text):
